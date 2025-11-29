@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频检测 - 智能图像分析系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .upload-hint {
+            font-size: 0.9rem;
+            opacity: 0.7;
+            margin-top: 0.5rem;
+        }
+        
+        .status-message {
+            margin: 1rem 0;
+            padding: 0.8rem;
+            background-color: rgba(0, 0, 0, 0.05);
+            border-left: 4px solid var(--primary-light);
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        .dark-theme .status-message {
+            background-color: rgba(255, 255, 255, 0.1);
+            border-left-color: var(--primary-dark);
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-content">
+            <a href="/" class="nav-logo">
+                <i class="fas fa-arrow-left"></i>
+                <span>返回首页</span>
+            </a>
+            <button class="theme-toggle" onclick="toggleTheme()">
+                <i class="fas fa-moon"></i>
+            </button>
+        </div>
+    </nav>
+
+    <div class="container" style="margin-top: 80px;">
+        <div class="card fade-in">
+            <h1><i class="fas fa-video"></i> 视频检测</h1>
+            <p class="subtitle">上传视频进行智能分析和检测</p>
+
+            <div class="upload-area" id="dropZone">
+                <i class="fas fa-cloud-upload-alt fa-3x"></i>
+                <p>拖拽视频到这里或点击上传</p>
+                <p class="upload-hint">支持最大500MB的视频文件</p>
+                <input type="file" id="fileInput" accept="video/*" style="display: none;">
+            </div>
+
+            <div id="preview" style="display: none;">
+                <div class="video-preview">
+                    <video id="previewVideo" controls></video>
+                </div>
+
+                <div class="settings">
+                    <div class="setting-item">
+                        <label for="fpsSlider">检测帧率：<span id="fpsValue">25</span> FPS</label>
+                        <input type="range" id="fpsSlider" min="1" max="60" value="25" class="slider">
+                    </div>
+                </div>
+
+                <div class="progress" id="progressBar" style="display: none;">
+                    <div class="progress-bar" style="width: 0%"></div>
+                </div>
+
+                <button class="btn btn-primary" onclick="startDetection()">
+                    <i class="fas fa-play"></i>
+                    开始检测
+                </button>
+            </div>
+
+            <div id="result" style="display: none;">
+                <h2>检测结果</h2>
+                <div class="video-result">
+                    <video id="resultVideo" controls></video>
+                </div>
+                <div class="download-section">
+                    <button class="btn btn-primary" onclick="downloadResult()">
+                        <i class="fas fa-download"></i>
+                        下载检测结果
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 主题切换
+        function toggleTheme() {
+            document.body.classList.toggle('dark-theme');
+            const themeIcon = document.querySelector('.theme-toggle i');
+            if (document.body.classList.contains('dark-theme')) {
+                themeIcon.classList.replace('fa-moon', 'fa-sun');
+                localStorage.setItem('theme', 'dark');
+            } else {
+                themeIcon.classList.replace('fa-sun', 'fa-moon');
+                localStorage.setItem('theme', 'light');
+            }
+        }
+
+        // 检查保存的主题
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme === 'dark') {
+                document.body.classList.add('dark-theme');
+                document.querySelector('.theme-toggle i').classList.replace('fa-moon', 'fa-sun');
+            }
+        });
+
+        // 文件上传处理
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const preview = document.getElementById('preview');
+        const previewVideo = document.getElementById('previewVideo');
+        const progressBar = document.getElementById('progressBar');
+        const result = document.getElementById('result');
+        const resultVideo = document.getElementById('resultVideo');
+        const fpsSlider = document.getElementById('fpsSlider');
+        const fpsValue = document.getElementById('fpsValue');
+
+        fpsSlider.addEventListener('input', (e) => {
+            fpsValue.textContent = e.target.value;
+        });
+
+        dropZone.addEventListener('click', () => fileInput.click());
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file && file.type.startsWith('video/')) {
+                handleFile(file);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                handleFile(file);
+            }
+        });
+
+        function handleFile(file) {
+            // 检查文件大小
+            const maxSizeMB = 500;
+            const maxSizeBytes = maxSizeMB * 1024 * 1024;
+            
+            if (file.size > maxSizeBytes) {
+                alert(`文件大小超过限制（${maxSizeMB}MB），请选择较小的文件或压缩后再上传。`);
+                return;
+            }
+            
+            const url = URL.createObjectURL(file);
+            previewVideo.src = url;
+            preview.style.display = 'block';
+            result.style.display = 'none';
+        }
+
+        async function startDetection() {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('fps', fpsSlider.value);
+
+            // 显示进度条
+            progressBar.style.display = 'block';
+            const progressBarFill = progressBar.querySelector('.progress-bar');
+            progressBarFill.style.width = '0%';
+
+            // 计算文件大小
+            const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+            
+            // 显示上传开始信息
+            updateStatus(`正在上传视频（${fileSizeMB}MB），请耐心等待...`);
+
+            try {
+                // 使用fetch上传文件并显示上传进度
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/api/start-video-detection', true);
+                
+                // 设置上传进度处理
+                xhr.upload.onprogress = (event) => {
+                    if (event.lengthComputable) {
+                        const percentComplete = Math.floor((event.loaded / event.total) * 100);
+                        progressBarFill.style.width = `${percentComplete}%`;
+                        updateStatus(`正在上传视频：${percentComplete}%`);
+                    }
+                };
+                
+                // 等待上传完成
+                const response = await new Promise((resolve, reject) => {
+                    xhr.onload = () => {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            try {
+                                resolve(JSON.parse(xhr.responseText));
+                            } catch (e) {
+                                reject(new Error('上传完成但服务器返回了非法JSON'));
+                            }
+                        } else {
+                            try {
+                                const errorData = JSON.parse(xhr.responseText);
+                                reject(new Error(errorData.error || `上传失败：HTTP ${xhr.status}`));
+                            } catch (e) {
+                                reject(new Error(`上传失败：HTTP ${xhr.status}`));
+                            }
+                        }
+                    };
+                    xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+                    xhr.ontimeout = () => reject(new Error('上传超时，请检查网络连接'));
+                    
+                    // 发送请求
+                    xhr.send(formData);
+                });
+
+                // 文件已上传，显示处理状态
+                const { detection_id, filename, video_info } = response;
+                
+                // 显示视频处理信息
+                if (video_info) {
+                    const { width, height, frames, original_fps } = video_info;
+                    updateStatus(`视频上传成功！分辨率: ${width}x${height}, 帧数: ${frames}, 原始FPS: ${original_fps}`);
+                    updateStatus(`正在进行视频处理，请耐心等待...`);
+                } else {
+                    updateStatus(`视频上传成功！正在进行视频处理...`);
+                }
+                
+                // 重置进度条，准备显示处理进度
+                progressBarFill.style.width = '0%';
+
+                // 轮询检测状态
+                const checkStatus = async () => {
+                    const statusResponse = await fetch(`/api/detection-status/${detection_id}`);
+                    if (!statusResponse.ok) {
+                        throw new Error('获取状态失败');
+                    }
+
+                    const statusData = await statusResponse.json();
+                    
+                    if (statusData.status === 'processing') {
+                        progressBarFill.style.width = `${statusData.progress}%`;
+                        if (statusData.message) {
+                            updateStatus(statusData.message);
+                        } else {
+                            updateStatus(`正在处理视频，进度: ${statusData.progress}%`);
+                        }
+                        setTimeout(checkStatus, 1000); // 每秒检查一次
+                    } else if (statusData.status === 'completed') {
+                        progressBarFill.style.width = '100%';
+                        updateStatus(`视频处理完成！`);
+                        resultVideo.src = `/processed/videos/${filename}?t=${new Date().getTime()}`;
+                        result.style.display = 'block';
+                        setTimeout(() => {
+                            progressBar.style.display = 'none';
+                            progressBarFill.style.width = '0%';
+                        }, 1000);
+                    } else if (statusData.status === 'error') {
+                        throw new Error(statusData.message || statusData.error || '检测失败');
+                    }
+                };
+
+                // 开始检查状态
+                await checkStatus();
+
+            } catch (error) {
+                alert('视频处理失败：' + error.message);
+                updateStatus(`处理失败: ${error.message}`);
+                progressBar.style.display = 'none';
+                progressBarFill.style.width = '0%';
+            }
+        }
+        
+        // 状态更新函数
+        function updateStatus(message) {
+            // 如果状态元素不存在，创建一个
+            let statusElement = document.getElementById('statusMessage');
+            if (!statusElement) {
+                statusElement = document.createElement('div');
+                statusElement.id = 'statusMessage';
+                statusElement.className = 'status-message';
+                progressBar.insertAdjacentElement('afterend', statusElement);
+            }
+            
+            statusElement.textContent = message;
+            console.log('状态更新:', message);
+        }
+
+        function downloadResult() {
+            const link = document.createElement('a');
+            link.href = resultVideo.src;
+            link.download = 'detected_video.mp4';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+    </script>
+
+    <style>
+        .subtitle {
+            color: var(--text-secondary-light);
+            margin-bottom: 2rem;
+        }
+
+        .dark-theme .subtitle {
+            color: var(--text-secondary-dark);
+        }
+
+        .video-preview, .video-result {
+            margin: 2rem 0;
+            text-align: center;
+        }
+
+        .video-preview video, .video-result video {
+            max-width: 100%;
+            max-height: 400px;
+            border-radius: 8px;
+        }
+
+        .settings {
+            margin: 2rem 0;
+            padding: 1rem;
+            background-color: var(--background-light);
+            border-radius: 8px;
+        }
+
+        .dark-theme .settings {
+            background-color: var(--surface-dark);
+        }
+
+        .setting-item {
+            margin-bottom: 1rem;
+        }
+
+        .setting-item label {
+            display: block;
+            margin-bottom: 0.5rem;
+        }
+
+        .slider {
+            width: 100%;
+            height: 4px;
+            background: var(--text-secondary-light);
+            border-radius: 2px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--primary-light);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .dark-theme .slider::-webkit-slider-thumb {
+            background: var(--primary-dark);
+        }
+
+        .download-section {
+            margin-top: 2rem;
+            text-align: center;
+        }
+
+        .dragover {
+            border-color: var(--primary-light);
+            background-color: rgba(0, 122, 255, 0.05);
+        }
+
+        .nav-logo {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: inherit;
+            text-decoration: none;
+            font-weight: 600;
+        }
+    </style>
+</body>
+</html> 

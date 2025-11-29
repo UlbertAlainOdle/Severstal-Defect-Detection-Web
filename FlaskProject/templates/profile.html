@@ -1,0 +1,650 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row">
+        <div class="col-md-4 mb-4">
+            <div class="card border-0 shadow-sm position-relative overflow-hidden profile-main-card">
+                <div class="profile-cover"></div>
+                <div class="card-body pt-0">
+                    <div class="text-center profile-avatar-container">
+                        <div class="profile-avatar-wrapper">
+                            <div class="profile-avatar">
+                                <i class="fas fa-user"></i>
+                            </div>
+                        </div>
+                    </div>
+                    <h3 class="text-center mt-3 mb-1">{{ user.username }}</h3>
+                    <p class="text-center text-muted mb-2">
+                        <i class="fas fa-envelope me-1"></i> {{ user.email }}
+                    </p>
+                    <div class="d-flex justify-content-center mb-3">
+                        <span class="badge rounded-pill bg-light text-dark me-2">
+                            <i class="fas fa-calendar-alt me-1"></i> 注册于 {{ user.created_at }}
+                        </span>
+                    </div>
+                    {% if user.last_login %}
+                    <div class="text-center mb-3">
+                        <small class="text-muted">
+                            <i class="fas fa-clock me-1"></i> 上次登录: {{ user.last_login }}
+                        </small>
+                    </div>
+                    {% endif %}
+                    <hr>
+                    <div class="row user-stats text-center g-0">
+                        <div class="col-4">
+                            <div class="stat-card-mini">
+                                <div class="stat-icon">
+                                    <i class="fas fa-image"></i>
+                                </div>
+                                <div class="stat-value">{{ user.get('image_count', 0) }}</div>
+                                <div class="stat-label">图像检测</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="stat-card-mini">
+                                <div class="stat-icon">
+                                    <i class="fas fa-video"></i>
+                                </div>
+                                <div class="stat-value">{{ user.get('video_count', 0) }}</div>
+                                <div class="stat-label">视频检测</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="stat-card-mini">
+                                <div class="stat-icon">
+                                    <i class="fas fa-camera"></i>
+                                </div>
+                                <div class="stat-value">{{ user.get('camera_count', 0) }}</div>
+                                <div class="stat-label">摄像头检测</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="d-grid mt-4">
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-primary">
+                            <i class="fas fa-arrow-left me-2"></i>返回首页
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-8">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-body">
+                    <!-- 修改Tab导航样式,增加点击事件和鼠标样式 -->
+                    <ul class="nav nav-tabs mb-4 profile-tab-nav" id="profileTabs">
+                        <li class="nav-item">
+                            <a class="nav-link active profile-tab-btn" id="basic-info-tab" data-bs-toggle="tab" href="#basic-info" role="tab" aria-controls="basic-info" aria-selected="true">
+                                <i class="fas fa-user me-2"></i>基本信息
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link profile-tab-btn" id="security-tab" data-bs-toggle="tab" href="#security" role="tab" aria-controls="security" aria-selected="false">
+                                <i class="fas fa-lock me-2"></i>安全设置
+                            </a>
+                        </li>
+                    </ul>
+                    
+                    <div class="tab-content" id="profileTabsContent">
+                        <div class="tab-pane fade show active" id="basic-info" role="tabpanel" aria-labelledby="basic-info-tab">
+                            <h4 class="card-title mb-4"><i class="fas fa-user-edit me-2 text-primary"></i>编辑个人信息</h4>
+                            
+                            {% if info_message %}
+                            <div class="alert alert-success d-flex align-items-center" role="alert">
+                                <i class="fas fa-check-circle me-2"></i>
+                                <div>{{ info_message }}</div>
+                            </div>
+                            {% endif %}
+                            
+                            {% if info_error %}
+                            <div class="alert alert-danger d-flex align-items-center" role="alert">
+                                <i class="fas fa-exclamation-circle me-2"></i>
+                                <div>{{ info_error }}</div>
+                            </div>
+                            {% endif %}
+                            
+                            <form method="post" action="/profile">
+                                <div class="mb-4">
+                                    <div class="form-floating">
+                                        <input type="text" id="username" name="username" class="form-control custom-input" value="{{ user.username }}" required>
+                                        <label for="username" class="form-label">
+                                            <i class="fas fa-user me-2"></i>用户名
+                                        </label>
+                                    </div>
+                                </div>
+                                
+                                <div class="mb-4">
+                                    <div class="form-floating">
+                                        <input type="email" id="email" name="email" class="form-control custom-input" value="{{ user.email }}" required>
+                                        <label for="email" class="form-label">
+                                            <i class="fas fa-envelope me-2"></i>电子邮箱
+                                        </label>
+                                    </div>
+                                </div>
+                                
+                                <div class="text-end">
+                                    <input type="hidden" name="update_info" value="1">
+                                    <button type="submit" class="btn btn-primary btn-update-custom px-4 py-2">
+                                        <i class="fas fa-save me-2"></i> 保存修改
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <div class="tab-pane fade" id="security" role="tabpanel" aria-labelledby="security-tab">
+                            <h4 class="card-title mb-4"><i class="fas fa-key me-2 text-primary"></i>修改密码</h4>
+                            
+                            {% if password_message %}
+                            <div class="alert alert-success d-flex align-items-center" role="alert">
+                                <i class="fas fa-check-circle me-2"></i>
+                                <div>{{ password_message }}</div>
+                            </div>
+                            {% endif %}
+                            
+                            {% if password_error %}
+                            <div class="alert alert-danger d-flex align-items-center" role="alert">
+                                <i class="fas fa-exclamation-circle me-2"></i>
+                                <div>{{ password_error }}</div>
+                            </div>
+                            {% endif %}
+                            
+                            <form method="post" action="/profile" id="passwordForm">
+                                <div class="mb-4 position-relative">
+                                    <div class="form-floating password-input-group">
+                                        <input type="password" id="current_password" name="current_password" class="form-control custom-input" placeholder="输入当前密码" required>
+                                        <label for="current_password" class="form-label">
+                                            <i class="fas fa-key me-2"></i>当前密码
+                                        </label>
+                                        <button type="button" class="btn-toggle-password" onclick="togglePasswordVisibility('current_password')">
+                                            <i class="fas fa-eye-slash"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                
+                                <div class="mb-4 position-relative">
+                                    <div class="form-floating password-input-group">
+                                        <input type="password" id="new_password" name="new_password" class="form-control custom-input" placeholder="输入新密码" required onkeyup="checkPasswordStrength()">
+                                        <label for="new_password" class="form-label">
+                                            <i class="fas fa-lock me-2"></i>新密码
+                                        </label>
+                                        <button type="button" class="btn-toggle-password" onclick="togglePasswordVisibility('new_password')">
+                                            <i class="fas fa-eye-slash"></i>
+                                        </button>
+                                    </div>
+                                    <div class="password-strength mt-2">
+                                        <div class="password-strength-bar" id="passwordStrengthBar"></div>
+                                    </div>
+                                    <div class="password-feedback mt-1" id="passwordFeedback"></div>
+                                </div>
+                                
+                                <div class="mb-4 position-relative">
+                                    <div class="form-floating password-input-group">
+                                        <input type="password" id="confirm_password" name="confirm_password" class="form-control custom-input" placeholder="再次输入新密码" required onkeyup="checkPasswordMatch()">
+                                        <label for="confirm_password" class="form-label">
+                                            <i class="fas fa-lock me-2"></i>确认新密码
+                                        </label>
+                                        <button type="button" class="btn-toggle-password" onclick="togglePasswordVisibility('confirm_password')">
+                                            <i class="fas fa-eye-slash"></i>
+                                        </button>
+                                    </div>
+                                    <div class="password-feedback mt-1" id="confirmFeedback"></div>
+                                </div>
+                                
+                                <div class="text-end">
+                                    <input type="hidden" name="update_password" value="1">
+                                    <button type="submit" class="btn btn-primary btn-update-custom px-4 py-2" id="updatePasswordBtn">
+                                        <i class="fas fa-key me-2"></i> 更新密码
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+    <style>
+    /* 个人资料卡样式 */
+    .profile-main-card {
+        border-radius: 15px;
+        transition: all 0.3s ease;
+    }
+    
+    .profile-main-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1) !important;
+    }
+    
+    .profile-cover {
+        height: 80px;
+        background: linear-gradient(135deg, #007bff, #6610f2);
+        margin-bottom: 50px;
+    }
+    
+    .dark-theme .profile-cover {
+        background: linear-gradient(135deg, #0d6efd, #6f42c1);
+    }
+    
+    .profile-avatar-container {
+        margin-top: -50px;
+    }
+    
+    .profile-avatar-wrapper {
+        display: inline-block;
+        padding: 4px;
+        background-color: #fff;
+        border-radius: 50%;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    }
+    
+    .dark-theme .profile-avatar-wrapper {
+        background-color: #343a40;
+        }
+        
+        .profile-avatar {
+        width: 90px;
+        height: 90px;
+            border-radius: 50%;
+        background: linear-gradient(135deg, #007bff, #6610f2);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 2.5rem;
+        }
+        
+        .dark-theme .profile-avatar {
+        background: linear-gradient(135deg, #0d6efd, #6f42c1);
+    }
+    
+    /* 用户统计卡片 */
+    .stat-card-mini {
+        padding: 10px;
+        border-radius: 10px;
+        transition: all 0.3s ease;
+        background: #f8f9fa;
+        margin: 0 5px;
+    }
+    
+    .dark-theme .stat-card-mini {
+        background: #343a40;
+    }
+    
+    .stat-card-mini:hover {
+        transform: translateY(-5px);
+        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+    }
+    
+    .dark-theme .stat-card-mini:hover {
+        background: linear-gradient(135deg, #343a40, #495057);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    }
+    
+    .stat-icon {
+        color: #007bff;
+        font-size: 1.5rem;
+        margin-bottom: 5px;
+    }
+    
+    .dark-theme .stat-icon {
+        color: #0d6efd;
+    }
+    
+    .stat-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-bottom: 0;
+    }
+    
+    .stat-label {
+        color: #6c757d;
+        font-size: 0.8rem;
+    }
+    
+    .dark-theme .stat-label {
+        color: #adb5bd;
+    }
+    
+    /* 表单样式 */
+    .custom-input {
+        border-radius: 10px;
+        border: 1px solid #ced4da;
+        padding-left: 2.5rem;
+        transition: all 0.3s ease;
+    }
+    
+    .custom-input:focus {
+        border-color: #007bff;
+        box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.15);
+    }
+    
+    .dark-theme .custom-input {
+        background-color: #343a40;
+        border-color: #495057;
+        color: #fff;
+    }
+    
+    .dark-theme .custom-input:focus {
+        border-color: #0d6efd;
+        box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+    }
+    
+    .form-floating label {
+        padding-left: 3.5rem;
+    }
+    
+    .form-floating>.form-control:focus~label,
+    .form-floating>.form-control:not(:placeholder-shown)~label {
+        padding-left: 0.75rem;
+        transform: scale(0.85) translateY(-0.5rem) translateX(0.15rem);
+    }
+    
+    .password-input-group {
+        position: relative;
+    }
+    
+    .btn-toggle-password {
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        color: #6c757d;
+        cursor: pointer;
+        z-index: 10;
+    }
+    
+    .dark-theme .btn-toggle-password {
+        color: #adb5bd;
+    }
+    
+    /* 按钮样式 */
+    .btn-update-custom {
+        background: linear-gradient(135deg, #007bff, #0069d9);
+        border: none;
+        border-radius: 10px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .btn-update-custom:hover {
+        background: linear-gradient(135deg, #0069d9, #0056b3);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 123, 255, 0.3);
+    }
+    
+    .dark-theme .btn-update-custom {
+        background: linear-gradient(135deg, #0d6efd, #0b5ed7);
+    }
+    
+    .dark-theme .btn-update-custom:hover {
+        background: linear-gradient(135deg, #0b5ed7, #0a58ca);
+        box-shadow: 0 4px 12px rgba(13, 110, 253, 0.3);
+    }
+    
+    /* 标签页样式 */
+    .profile-tab-nav .nav-item {
+        margin-bottom: -1px;
+    }
+    
+    .profile-tab-btn {
+        border: none;
+        border-radius: 0;
+        padding: 0.75rem 1.25rem;
+        font-weight: 600;
+        color: #495057 !important;
+        position: relative;
+        transition: all 0.3s ease;
+        cursor: pointer;
+    }
+    
+    .profile-tab-btn:hover {
+        color: #007bff !important;
+    }
+    
+    .profile-tab-btn.active {
+        color: #007bff !important;
+        background-color: transparent;
+        border-bottom: 3px solid #007bff;
+    }
+    
+    .profile-tab-btn::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        height: 3px;
+        background: linear-gradient(135deg, #007bff, #6610f2);
+        transform: scaleX(0);
+        transform-origin: left;
+        transition: transform 0.3s ease;
+        border-radius: 3px 3px 0 0;
+    }
+    
+    .profile-tab-btn.active::after {
+        transform: scaleX(1);
+    }
+    
+    .dark-theme .profile-tab-btn {
+        color: #adb5bd !important;
+    }
+    
+    .dark-theme .profile-tab-btn:hover,
+    .dark-theme .profile-tab-btn.active {
+        color: #0d6efd !important;
+    }
+    
+    .dark-theme .profile-tab-btn::after {
+        background: linear-gradient(135deg, #0d6efd, #6f42c1);
+    }
+    
+    /* 密码强度条样式 */
+        .password-strength {
+            height: 5px;
+            border-radius: 5px;
+            background-color: #e9ecef;
+        overflow: hidden;
+    }
+    
+    .dark-theme .password-strength {
+        background-color: #495057;
+        }
+        
+        .password-strength-bar {
+            height: 100%;
+            border-radius: 5px;
+            width: 0;
+            transition: all 0.3s ease;
+        }
+        
+        .strength-weak {
+            width: 33%;
+        background: linear-gradient(90deg, #dc3545, #fd7e14);
+        }
+        
+        .strength-medium {
+            width: 66%;
+        background: linear-gradient(90deg, #ffc107, #20c997);
+        }
+        
+        .strength-strong {
+            width: 100%;
+        background: linear-gradient(90deg, #20c997, #28a745);
+    }
+    
+    /* 移动端适配 */
+    @media (max-width: 767px) {
+        .profile-avatar {
+            width: 80px;
+            height: 80px;
+            font-size: 2rem;
+        }
+        
+        .stat-card-mini {
+            margin: 0 2px;
+            padding: 8px 5px;
+        }
+        
+        .stat-icon {
+            font-size: 1.2rem;
+        }
+        
+        .stat-value {
+            font-size: 1.2rem;
+        }
+        
+        .stat-label {
+            font-size: 0.7rem;
+            }
+        }
+    </style>
+
+<script>
+    // 激活Bootstrap标签页
+    document.addEventListener('DOMContentLoaded', function() {
+        // 获取所有标签页链接
+        var tabLinks = document.querySelectorAll('.profile-tab-btn');
+        
+        // 为每个标签页链接添加点击事件
+        tabLinks.forEach(function(tabLink) {
+            tabLink.addEventListener('click', function(event) {
+                // 阻止默认行为
+                event.preventDefault();
+                
+                // 移除所有标签页链接的active类
+                tabLinks.forEach(function(link) {
+                    link.classList.remove('active');
+                });
+                
+                // 为当前点击的标签页链接添加active类
+                this.classList.add('active');
+                
+                // 获取目标标签页的id
+                var targetId = this.getAttribute('href');
+                
+                // 隐藏所有标签页内容
+                document.querySelectorAll('.tab-pane').forEach(function(pane) {
+                    pane.classList.remove('show', 'active');
+                });
+                
+                // 显示目标标签页内容
+                var targetPane = document.querySelector(targetId);
+                targetPane.classList.add('show', 'active');
+            });
+        });
+    });
+
+    function togglePasswordVisibility(inputId) {
+        const input = document.getElementById(inputId);
+        const button = input.parentNode.querySelector('.btn-toggle-password');
+        const icon = button.querySelector('i');
+        
+        if (input.type === 'password') {
+            input.type = 'text';
+            icon.classList.replace('fa-eye-slash', 'fa-eye');
+        } else {
+            input.type = 'password';
+            icon.classList.replace('fa-eye', 'fa-eye-slash');
+        }
+        }
+        
+        // 检查密码强度
+        function checkPasswordStrength() {
+            const password = document.getElementById('new_password').value;
+            const strengthBar = document.getElementById('passwordStrengthBar');
+            const feedback = document.getElementById('passwordFeedback');
+            
+            // 移除所有类
+            strengthBar.classList.remove('strength-weak', 'strength-medium', 'strength-strong');
+            
+            if (password.length === 0) {
+                strengthBar.style.width = '0';
+                feedback.textContent = '';
+                return;
+            }
+            
+            // 简单的密码强度检查
+            let strength = 0;
+            
+            // 长度检查
+            if (password.length >= 8) {
+                strength += 1;
+            }
+            
+            // 包含数字
+            if (/\d/.test(password)) {
+                strength += 1;
+            }
+            
+            // 包含特殊字符
+            if (/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+                strength += 1;
+            }
+            
+            // 包含大写字母
+            if (/[A-Z]/.test(password)) {
+                strength += 1;
+            }
+            
+            // 包含小写字母
+            if (/[a-z]/.test(password)) {
+                strength += 1;
+            }
+            
+            // 根据强度设置样式和反馈
+            if (strength <= 2) {
+                strengthBar.classList.add('strength-weak');
+                feedback.textContent = '弱：尝试添加数字、特殊字符和大小写字母';
+                feedback.style.color = '#dc3545';
+            } else if (strength <= 4) {
+                strengthBar.classList.add('strength-medium');
+                feedback.textContent = '中等：可以再添加一些特殊字符';
+                feedback.style.color = '#ffc107';
+            } else {
+                strengthBar.classList.add('strength-strong');
+                feedback.textContent = '强：非常安全的密码';
+                feedback.style.color = '#28a745';
+            }
+        }
+        
+        // 检查密码匹配
+        function checkPasswordMatch() {
+            const password = document.getElementById('new_password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            const feedback = document.getElementById('confirmFeedback');
+            
+            if (confirmPassword.length === 0) {
+                feedback.textContent = '';
+                return;
+            }
+            
+            if (password === confirmPassword) {
+                feedback.textContent = '密码匹配';
+                feedback.style.color = '#28a745';
+            } else {
+                feedback.textContent = '密码不匹配';
+                feedback.style.color = '#dc3545';
+            }
+        }
+        
+        // 表单验证
+        document.getElementById('passwordForm').addEventListener('submit', function(event) {
+            const password = document.getElementById('new_password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            
+            if (password !== confirmPassword) {
+                event.preventDefault();
+                document.getElementById('confirmFeedback').textContent = '密码不匹配，请重新输入';
+                document.getElementById('confirmFeedback').style.color = '#dc3545';
+            }
+        });
+    </script>
+{% endblock %} 

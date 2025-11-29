@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="chat-page">
+    <div class="chat-header">
+        <h1>智能问答</h1>
+        <p>基于Coze平台打造的智能助手，可以解答有关缺陷检测、钢材质量等问题</p>
+    </div>
+    
+    <div id="coze-container" class="coze-container">
+        <!-- Coze智能体将在这里加载 -->
+    </div>
+</div>
+
+<style>
+.chat-page {
+    min-height: 100vh;
+    background: var(--bg-color);
+    transition: background-color 0.3s ease;
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.chat-header {
+    text-align: center;
+    margin-bottom: 2rem;
+    animation: fadeIn 0.5s ease;
+}
+
+.chat-header h1 {
+    font-size: 2.5rem;
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
+}
+
+.chat-header p {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.coze-container {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    min-height: 600px;
+    animation: fadeIn 0.8s ease;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 亮色主题变量 */
+:root {
+    --bg-color: #f5f5f7;
+    --text-primary: #1d1d1f;
+    --text-secondary: #86868b;
+    --border-color: #d2d2d7;
+}
+
+/* 暗色主题变量 */
+.dark-theme {
+    --bg-color: #000000;
+    --text-primary: #f5f5f7;
+    --text-secondary: #86868b;
+    --border-color: #424245;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .chat-page {
+        padding: 1rem;
+    }
+    
+    .chat-header h1 {
+        font-size: 2rem;
+    }
+    
+    .chat-header p {
+        font-size: 1rem;
+    }
+    
+    .coze-container {
+        min-height: 500px;
+    }
+}
+</style>
+
+<script src="https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/1.2.0-beta.5/libs/cn/index.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // 初始化Coze SDK
+    new CozeWebSDK.WebChatClient({
+        config: {
+            bot_id: '7487824471194697728',
+        },
+        componentProps: {
+            title: '缺陷检测智能助手',
+            description: '解答您关于缺陷检测、钢材质量的问题',
+            primaryColor: '#007AFF',
+            welcomeMessage: '您好！我是您的缺陷检测智能助手，请问有什么可以帮您的？',
+            placeholder: '请输入您的问题...'
+        },
+        auth: {
+            type: 'token',
+            token: 'pat_oZT0xOr9nRvZAstbc9CDtoTHPR42AjqySFJvfUjbBnoG15f3mGfcL7oYv0dtBYmS',
+            onRefreshToken: function() {
+                return 'pat_oZT0xOr9nRvZAstbc9CDtoTHPR42AjqySFJvfUjbBnoG15f3mGfcL7oYv0dtBYmS';
+            }
+        },
+        containerElem: document.getElementById('coze-container')
+    });
+    
+    // 检测并应用主题
+    const checkTheme = () => {
+        const isDark = document.body.classList.contains('dark-theme');
+        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+    };
+    
+    // 初始检查
+    checkTheme();
+    
+    // 监听主题变化
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            if (mutation.attributeName === 'class') {
+                checkTheme();
+            }
+        });
+    });
+    
+    observer.observe(document.body, {
+        attributes: true
+    });
+});
+</script>
+{% endblock %} 

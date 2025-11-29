@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能检测系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .navbar-brand {
+            font-weight: bold;
+        }
+        .nav-link {
+            color: rgba(255,255,255,.8) !important;
+        }
+        .nav-link:hover {
+            color: #fff !important;
+        }
+        .nav-link.active {
+            color: #fff !important;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('index') }}">智能检测系统</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index') }}">
+                            <i class="bi bi-house-door"></i> 首页
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'image_detection' %}active{% endif %}" href="{{ url_for('image_detection') }}">
+                            <i class="bi bi-image"></i> 图像检测
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'video_detection' %}active{% endif %}" href="{{ url_for('video_detection') }}">
+                            <i class="bi bi-camera-video"></i> 视频检测
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'camera_detection' %}active{% endif %}" href="{{ url_for('camera_detection') }}">
+                            <i class="bi bi-camera"></i> 摄像头检测
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'detection_records' %}active{% endif %}" href="{{ url_for('detection_records') }}">
+                            <i class="bi bi-list-check"></i> 检测记录
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'analytics' %}active{% endif %}" href="{{ url_for('analytics') }}">
+                            <i class="bi bi-graph-up"></i> 统计分析
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" id="nav-chat-link" href="javascript:void(0)">
+                            <i class="bi bi-chat-dots"></i> 智能问答
+                        </a>
+                    </li>
+                </ul>
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'profile' %}active{% endif %}" href="{{ url_for('profile') }}">
+                            <i class="bi bi-person"></i> 个人中心
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('logout') }}">
+                            <i class="bi bi-box-arrow-right"></i> 退出
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        {% block content %}{% endblock %}
+    </div>
+
+    <!-- Coze SDK -->
+    <script src="https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/1.2.0-beta.5/libs/cn/index.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // 初始化导航栏上的智能问答链接
+            const navChatLink = document.getElementById('nav-chat-link');
+            if (navChatLink) {
+                navChatLink.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    // 初始化Coze智能体
+                    new CozeWebSDK.WebChatClient({
+                        config: {
+                            bot_id: '7487824471194697728',
+                        },
+                        componentProps: {
+                            title: '缺陷检测智能助手',
+                            description: '解答您关于缺陷检测、钢材质量的问题',
+                            primaryColor: '#007AFF',
+                            welcomeMessage: '您好！我是您的缺陷检测智能助手，请问有什么可以帮您的？',
+                            placeholder: '请输入您的问题...'
+                        },
+                        auth: {
+                            type: 'token',
+                            token: 'pat_oZT0xOr9nRvZAstbc9CDtoTHPR42AjqySFJvfUjbBnoG15f3mGfcL7oYv0dtBYmS',
+                            onRefreshToken: function() {
+                                return 'pat_oZT0xOr9nRvZAstbc9CDtoTHPR42AjqySFJvfUjbBnoG15f3mGfcL7oYv0dtBYmS';
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html> 

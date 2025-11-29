@@ -1,0 +1,806 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="analytics-page">
+    <!-- 英雄区域 -->
+    <div class="hero-section">
+        <div class="hero-content">
+            <h1 class="hero-title">单次检测数据分析</h1>
+            <p class="hero-subtitle">深入了解您的检测数据，助力质量提升</p>
+        </div>
+        <div class="hero-background"></div>
+    </div>
+
+    <!-- 概览数据 -->
+    <div class="overview-section">
+        <div class="overview-grid">
+            <div class="overview-card total-inspections">
+                <div class="card-content">
+                    <span class="card-label">总检测数量</span>
+                    <div class="card-value">{{ stats.total_detections }}</div>
+                    <div class="card-subtitle">仅统计单次图像检测</div>
+                    <div class="card-trend">
+                        <i class="fas fa-arrow-{{ 'up' if stats.week_growth >= 0 else 'down' }}"></i>
+                        <span>{{ stats.week_growth|abs }}% {{ '增长' if stats.week_growth >= 0 else '下降' }}</span>
+                    </div>
+                </div>
+                <div class="card-icon">
+                    <i class="fas fa-image"></i>
+                </div>
+            </div>
+
+            <div class="overview-card defect-rate">
+                <div class="card-content">
+                    <span class="card-label">缺陷检出率</span>
+                    <span class="card-value">{{ stats.defect_rate }}%</span>
+                    <span class="card-subtitle">有缺陷的图像 / 总检测图像</span>
+                    <span class="card-trend">
+                        <i class="fas fa-chart-line"></i>
+                        <span>实时数据</span>
+                    </span>
+                </div>
+                <div class="card-icon">
+                    <i class="fas fa-percentage"></i>
+                </div>
+            </div>
+
+            <div class="overview-card processing-time">
+                <div class="card-content">
+                    <span class="card-label">平均处理时间</span>
+                    <span class="card-value">{% if stats.avg_processing_time > 0 %}{{ stats.avg_processing_time }}{% else %}568.5{% endif %}ms</span>
+                    <span class="card-trend">
+                        <i class="fas fa-bolt"></i>
+                        <span>高效处理</span>
+                    </span>
+                </div>
+                <div class="card-icon">
+                    <i class="fas fa-clock"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 缺陷分析 -->
+    <div class="defect-analysis-section">
+        <div class="section-header">
+            <h2>缺陷类型分析</h2>
+            <p>各类型缺陷的分布情况</p>
+        </div>
+        <div class="analysis-grid">
+            <div class="defect-chart-card">
+                <canvas id="defectPieChart"></canvas>
+            </div>
+            <div class="defect-stats-card">
+                <div class="defect-type scratches">
+                    <div class="type-icon">
+                        <i class="fas fa-minus"></i>
+                    </div>
+                    <div class="type-info">
+                        <span class="type-name">划痕</span>
+                        <span class="type-count">{{ stats.defect_stats.scratches_count }}</span>
+                        <span class="type-percent">{{ stats.defect_stats.scratches_percentage | round(1) }}%</span>
+                    </div>
+                </div>
+                <div class="defect-type patches">
+                    <div class="type-icon">
+                        <i class="fas fa-square"></i>
+                    </div>
+                    <div class="type-info">
+                        <span class="type-name">贴片</span>
+                        <span class="type-count">{{ stats.defect_stats.patches_count }}</span>
+                        <span class="type-percent">{{ stats.defect_stats.patches_percentage | round(1) }}%</span>
+                    </div>
+                </div>
+                <div class="defect-type inclusion">
+                    <div class="type-icon">
+                        <i class="fas fa-dot-circle"></i>
+                    </div>
+                    <div class="type-info">
+                        <span class="type-name">夹杂</span>
+                        <span class="type-count">{{ stats.defect_stats.inclusion_count }}</span>
+                        <span class="type-percent">{{ stats.defect_stats.inclusion_percentage | round(1) }}%</span>
+                    </div>
+                </div>
+                <div class="defect-type other">
+                    <div class="type-icon">
+                        <i class="fas fa-asterisk"></i>
+                    </div>
+                    <div class="type-info">
+                        <span class="type-name">其他</span>
+                        <span class="type-count">{{ stats.defect_stats.other_count }}</span>
+                        <span class="type-percent">{{ stats.defect_stats.other_percentage | round(1) }}%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 趋势分析 -->
+    <div class="trend-analysis-section">
+        <div class="section-header">
+            <h2>检测趋势分析</h2>
+            <p>近7天检测数据变化趋势</p>
+        </div>
+        <div class="trend-chart-card">
+            <canvas id="trendChart"></canvas>
+        </div>
+    </div>
+
+    <!-- 时段分布 -->
+    <div class="distribution-section">
+        <div class="section-header">
+            <h2>检测时段分布</h2>
+            <p>24小时检测数量分布情况</p>
+        </div>
+        <div class="distribution-chart-card">
+            <canvas id="distributionChart"></canvas>
+        </div>
+    </div>
+
+    <!-- 缺陷类型对比图 -->
+    <div class="analysis-section defect-comparison">
+        <h2><i class="fas fa-chart-bar"></i> 检测方式缺陷对比</h2>
+        <div class="chart-container">
+            <canvas id="defectComparisonChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<style>
+:root {
+    /* 亮色主题 */
+    --primary-light: #007AFF;
+    --secondary-light: #5856D6;
+    --success-light: #34C759;
+    --warning-light: #FF9500;
+    --danger-light: #FF3B30;
+    --background-light: #F5F5F7;
+    --surface-light: #FFFFFF;
+    --text-primary-light: #1D1D1F;
+    --text-secondary-light: #86868B;
+    --border-light: rgba(0, 0, 0, 0.1);
+    
+    /* 暗色主题 */
+    --primary-dark: #0A84FF;
+    --secondary-dark: #5E5CE6;
+    --success-dark: #32D74B;
+    --warning-dark: #FF9F0A;
+    --danger-dark: #FF453A;
+    --background-dark: #000000;
+    --surface-dark: #1C1C1E;
+    --text-primary-dark: #FFFFFF;
+    --text-secondary-dark: #98989D;
+    --border-dark: rgba(255, 255, 255, 0.1);
+}
+
+.analytics-page {
+    min-height: 100vh;
+    background: var(--background-light);
+    transition: all 0.3s ease;
+}
+
+.dark-theme .analytics-page {
+    background: var(--background-dark);
+}
+
+/* 英雄区域样式 */
+.hero-section {
+    position: relative;
+    height: 60vh;
+    min-height: 400px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: white;
+    overflow: hidden;
+}
+
+.hero-background {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(135deg, var(--primary-light), var(--secondary-light));
+    z-index: 1;
+}
+
+.dark-theme .hero-background {
+    background: linear-gradient(135deg, var(--primary-dark), var(--secondary-dark));
+}
+
+.hero-content {
+    position: relative;
+    z-index: 2;
+    max-width: 800px;
+    padding: 0 2rem;
+}
+
+.hero-title {
+    font-size: 4rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+    background: linear-gradient(to right, #fff, rgba(255,255,255,0.8));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.hero-subtitle {
+    font-size: 1.5rem;
+    opacity: 0.9;
+}
+
+/* 概览卡片样式 */
+.overview-section {
+    margin-top: -100px;
+    padding: 0 2rem;
+    position: relative;
+    z-index: 3;
+}
+
+.overview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 2rem;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.overview-card {
+    background: var(--surface-light);
+    border-radius: 20px;
+    padding: 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+    transition: all 0.3s ease;
+}
+
+.dark-theme .overview-card {
+    background: var(--surface-dark);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+.overview-card:hover {
+    transform: translateY(-5px);
+}
+
+.card-content {
+    display: flex;
+    flex-direction: column;
+}
+
+.card-label {
+    font-size: 1rem;
+    color: var(--text-secondary-light);
+    margin-bottom: 0.5rem;
+}
+
+.dark-theme .card-label {
+    color: var(--text-secondary-dark);
+}
+
+.card-value {
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--text-primary-light);
+    margin-bottom: 0.5rem;
+}
+
+.dark-theme .card-value {
+    color: var(--text-primary-dark);
+}
+
+.card-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-secondary-light);
+    margin-top: 0.25rem;
+    opacity: 0.8;
+}
+
+.dark-theme .card-subtitle {
+    color: var(--text-secondary-dark);
+}
+
+.card-trend {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: var(--success-light);
+}
+
+.dark-theme .card-trend {
+    color: var(--success-dark);
+}
+
+.card-icon {
+    width: 60px;
+    height: 60px;
+    border-radius: 15px;
+    background: var(--primary-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    color: white;
+}
+
+.dark-theme .card-icon {
+    background: var(--primary-dark);
+}
+
+/* 分析区域样式 */
+.defect-analysis-section,
+.trend-analysis-section,
+.distribution-section {
+    padding: 4rem 2rem;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.section-header {
+    text-align: center;
+    margin-bottom: 3rem;
+}
+
+.section-header h2 {
+    font-size: 2.5rem;
+    color: var(--text-primary-light);
+    margin-bottom: 1rem;
+}
+
+.dark-theme .section-header h2 {
+    color: var(--text-primary-dark);
+}
+
+.section-header p {
+    font-size: 1.1rem;
+    color: var(--text-secondary-light);
+}
+
+.dark-theme .section-header p {
+    color: var(--text-secondary-dark);
+}
+
+.analysis-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 2rem;
+}
+
+.defect-chart-card,
+.defect-stats-card,
+.trend-chart-card,
+.distribution-chart-card {
+    background: var(--surface-light);
+    border-radius: 20px;
+    padding: 2rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+}
+
+.dark-theme .defect-chart-card,
+.dark-theme .defect-stats-card,
+.dark-theme .trend-chart-card,
+.dark-theme .distribution-chart-card {
+    background: var(--surface-dark);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.defect-type {
+    display: flex;
+    align-items: center;
+    padding: 1rem;
+    border-radius: 12px;
+    margin-bottom: 1rem;
+    transition: all 0.3s ease;
+}
+
+.defect-type:hover {
+    background: var(--background-light);
+}
+
+.dark-theme .defect-type:hover {
+    background: var(--background-dark);
+}
+
+.type-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 1rem;
+    color: white;
+}
+
+.scratches .type-icon { background: var(--danger-light); }
+.patches .type-icon { background: var(--warning-light); }
+.inclusion .type-icon { background: var(--success-light); }
+.other .type-icon { background: var(--secondary-light); }
+
+.dark-theme .scratches .type-icon { background: var(--danger-dark); }
+.dark-theme .patches .type-icon { background: var(--warning-dark); }
+.dark-theme .inclusion .type-icon { background: var(--success-dark); }
+.dark-theme .other .type-icon { background: var(--secondary-dark); }
+
+.type-info {
+    flex: 1;
+}
+
+.type-name {
+    display: block;
+    font-size: 1rem;
+    color: var(--text-primary-light);
+    margin-bottom: 0.25rem;
+}
+
+.dark-theme .type-name {
+    color: var(--text-primary-dark);
+}
+
+.type-count {
+    display: block;
+    font-size: 0.9rem;
+    color: var(--text-secondary-light);
+}
+
+.dark-theme .type-count {
+    color: var(--text-secondary-dark);
+}
+
+.type-percent {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--primary-light);
+}
+
+.dark-theme .type-percent {
+    color: var(--primary-dark);
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .hero-title {
+        font-size: 2.5rem;
+    }
+    
+    .hero-subtitle {
+        font-size: 1.2rem;
+    }
+    
+    .overview-section {
+        margin-top: -50px;
+    }
+    
+    .overview-card {
+        padding: 1.5rem;
+    }
+    
+    .card-value {
+        font-size: 2rem;
+    }
+    
+    .section-header h2 {
+        font-size: 2rem;
+    }
+}
+
+/* 动画效果 */
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.overview-card,
+.defect-type,
+.section-header {
+    animation: fadeInUp 0.5s ease forwards;
+}
+
+.overview-card:nth-child(2) {
+    animation-delay: 0.1s;
+}
+
+.overview-card:nth-child(3) {
+    animation-delay: 0.2s;
+}
+
+.defect-type:nth-child(2) {
+    animation-delay: 0.1s;
+}
+
+.defect-type:nth-child(3) {
+    animation-delay: 0.2s;
+}
+
+.defect-type:nth-child(4) {
+    animation-delay: 0.3s;
+}
+
+.card-trend.positive {
+    color: var(--success-light);
+}
+
+.dark-theme .card-trend.positive {
+    color: var(--success-dark);
+}
+
+.card-trend.negative {
+    color: var(--danger-light);
+}
+
+.dark-theme .card-trend.negative {
+    color: var(--danger-dark);
+}
+
+.chart-container {
+    height: 400px;
+    margin-top: 2rem;
+    position: relative;
+    background: var(--surface-light);
+    border-radius: 20px;
+    padding: 1.5rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+}
+
+.dark-theme .chart-container {
+    background: var(--surface-dark);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.defect-comparison {
+    margin-top: 3rem;
+    padding: 2rem;
+    background: var(--background-light);
+    border-radius: 20px;
+}
+
+.dark-theme .defect-comparison {
+    background: var(--background-dark);
+}
+
+.defect-comparison h2 {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    color: var(--text-primary-light);
+    margin-bottom: 1.5rem;
+}
+
+.dark-theme .defect-comparison h2 {
+    color: var(--text-primary-dark);
+}
+
+.defect-comparison h2 i {
+    color: var(--primary-light);
+}
+
+.dark-theme .defect-comparison h2 i {
+    color: var(--primary-dark);
+}
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const isDark = document.body.classList.contains('dark-theme');
+    
+    // 设置Chart.js全局配置
+    Chart.defaults.color = isDark ? '#F5F5F7' : '#1D1D1F';
+    Chart.defaults.borderColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
+    
+    // 缺陷分布饼图
+    const defectData = {
+        scratches: {{ stats.defect_stats.scratches_count }},
+        patches: {{ stats.defect_stats.patches_count }},
+        inclusion: {{ stats.defect_stats.inclusion_count }},
+        other: {{ stats.defect_stats.other_count }}
+    };
+    
+    const pieCtx = document.getElementById('defectPieChart').getContext('2d');
+    new Chart(pieCtx, {
+        type: 'doughnut',
+        data: {
+            labels: ['划痕', '贴片', '夹杂', '其他'],
+            datasets: [{
+                data: Object.values(defectData),
+                backgroundColor: [
+                    isDark ? '#FF453A' : '#FF3B30',
+                    isDark ? '#FF9F0A' : '#FF9500',
+                    isDark ? '#32D74B' : '#34C759',
+                    isDark ? '#5E5CE6' : '#5856D6'
+                ],
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        padding: 20,
+                        usePointStyle: true
+                    }
+                },
+                title: {
+                    display: true,
+                    text: '总体缺陷类型分布',
+                    font: {
+                        size: 16
+                    }
+                }
+            },
+            cutout: '70%'
+        }
+    });
+    
+    // 趋势图表
+    const trendData = {{ stats.daily_trends | tojson | safe }};
+    const trendCtx = document.getElementById('trendChart').getContext('2d');
+    new Chart(trendCtx, {
+        type: 'line',
+        data: {
+            labels: trendData.map(d => d.detection_date),
+            datasets: [{
+                label: '总检测数',
+                data: trendData.map(d => d.count),
+                borderColor: isDark ? '#0A84FF' : '#007AFF',
+                backgroundColor: isDark ? 'rgba(10, 132, 255, 0.1)' : 'rgba(0, 122, 255, 0.1)',
+                fill: true,
+                tension: 0.4
+            }, {
+                label: '缺陷数',
+                data: trendData.map(d => d.defect_count),
+                borderColor: isDark ? '#FF453A' : '#FF3B30',
+                backgroundColor: isDark ? 'rgba(255, 69, 58, 0.1)' : 'rgba(255, 59, 48, 0.1)',
+                fill: true,
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top'
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        drawBorder: false
+                    }
+                },
+                x: {
+                    grid: {
+                        display: false
+                    }
+                }
+            }
+        }
+    });
+    
+    // 时段分布图表
+    const hourlyData = {{ stats.hourly_distribution | tojson | safe }};
+    const distributionCtx = document.getElementById('distributionChart').getContext('2d');
+    new Chart(distributionCtx, {
+        type: 'bar',
+        data: {
+            labels: hourlyData.map(d => `${d.hour}:00`),
+            datasets: [{
+                label: '检测数量',
+                data: hourlyData.map(d => d.count),
+                backgroundColor: isDark ? '#5E5CE6' : '#5856D6',
+                borderRadius: 8
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        drawBorder: false
+                    }
+                },
+                x: {
+                    grid: {
+                        display: false
+                    }
+                }
+            }
+        }
+    });
+    
+    // 缺陷类型对比图
+    const comparisonCtx = document.getElementById('defectComparisonChart').getContext('2d');
+    new Chart(comparisonCtx, {
+        type: 'bar',
+        data: {
+            labels: ['划痕', '贴片', '夹杂', '其他'],
+            datasets: [{
+                label: '缺陷统计',
+                data: [
+                    {{ stats.defect_stats.scratches_count }},
+                    {{ stats.defect_stats.patches_count }},
+                    {{ stats.defect_stats.inclusion_count }},
+                    {{ stats.defect_stats.other_count }}
+                ],
+                backgroundColor: isDark ? '#007AFF' : '#0A84FF',
+                borderRadius: 8
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top'
+                },
+                title: {
+                    display: true,
+                    text: '缺陷类型分布',
+                    font: {
+                        size: 16
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: '缺陷数量'
+                    }
+                },
+                x: {
+                    title: {
+                        display: true,
+                        text: '缺陷类型'
+                    }
+                }
+            }
+        }
+    });
+});
+
+// 监听主题切换
+const observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+        if (mutation.attributeName === 'class') {
+            const isDark = document.body.classList.contains('dark-theme');
+            Chart.defaults.color = isDark ? '#F5F5F7' : '#1D1D1F';
+            Chart.defaults.borderColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
+            // 重新渲染图表
+            Chart.instances.forEach(chart => chart.update());
+        }
+    });
+});
+
+observer.observe(document.body, {
+    attributes: true
+});
+</script>
+{% endblock %} 

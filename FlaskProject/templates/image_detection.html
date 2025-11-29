@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图像检测 - 智能图像分析系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-content">
+            <a href="/" class="nav-logo">
+                <i class="fas fa-arrow-left"></i>
+                <span>返回首页</span>
+            </a>
+            <button class="theme-toggle" onclick="toggleTheme()">
+                <i class="fas fa-moon"></i>
+            </button>
+        </div>
+    </nav>
+
+    <div class="container" style="margin-top: 80px;">
+        <div class="card fade-in">
+            <h1><i class="fas fa-image"></i> 图像检测</h1>
+            <p class="subtitle">上传图片进行智能分析和检测</p>
+
+            <div class="upload-area" id="dropZone">
+                <i class="fas fa-cloud-upload-alt fa-3x"></i>
+                <p>拖拽图片到这里或点击上传</p>
+                <input type="file" id="fileInput" accept="image/*" style="display: none;">
+            </div>
+
+            <div class="detection-options">
+                <div class="option-group">
+                    <label for="detectionMode">检测模式:</label>
+                    <select id="detectionMode">
+                        <option value="predict">普通检测</option>
+                        <option value="confidence">置信度检测</option>
+                        <option value="heatmap">热力图检测</option>
+                    </select>
+                </div>
+                <div class="option-group confidence-option" style="display: none;">
+                    <label for="confidenceThreshold">置信度阈值:</label>
+                    <input type="range" id="confidenceThreshold" min="0.1" max="0.9" step="0.1" value="0.6">
+                    <span id="confidenceValue">0.6</span>
+                </div>
+            </div>
+
+            <div id="preview" style="display: none;">
+                <div class="image-preview">
+                    <img id="previewImage" alt="预览图片">
+                </div>
+                <div class="progress" id="progressBar" style="display: none;">
+                    <div class="progress-bar" style="width: 0%"></div>
+                </div>
+                <button class="btn btn-primary" onclick="startDetection()">
+                    <i class="fas fa-play"></i>
+                    开始检测
+                </button>
+            </div>
+
+            <div id="result" style="display: none;">
+                <h2>检测结果</h2>
+                <div class="result-images">
+                    <div class="original-image">
+                        <h3>原始图片</h3>
+                        <img id="originalImage" alt="原始图片">
+                    </div>
+                    <div class="detected-image">
+                        <h3>检测结果</h3>
+                        <img id="detectedImage" alt="检测结果">
+                    </div>
+                </div>
+                
+                <div class="defect-info" id="defectInfo" style="display: none;">
+                    <h3>缺陷检测统计</h3>
+                    <div class="defect-stats">
+                        <div class="stats-container">
+                            <table class="defect-table">
+                                <thead>
+                                    <tr>
+                                        <th>缺陷类型</th>
+                                        <th>颜色标识</th>
+                                        <th>像素数量</th>
+                                        <th>占比</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="defectsTableBody">
+                                    <!-- 将由JavaScript填充 -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="defectChart" width="300" height="300"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 主题切换
+        function toggleTheme() {
+            document.body.classList.toggle('dark-theme');
+            const themeIcon = document.querySelector('.theme-toggle i');
+            if (document.body.classList.contains('dark-theme')) {
+                themeIcon.classList.replace('fa-moon', 'fa-sun');
+                localStorage.setItem('theme', 'dark');
+            } else {
+                themeIcon.classList.replace('fa-sun', 'fa-moon');
+                localStorage.setItem('theme', 'light');
+            }
+        }
+
+        // 检查保存的主题
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme === 'dark') {
+                document.body.classList.add('dark-theme');
+                document.querySelector('.theme-toggle i').classList.replace('fa-moon', 'fa-sun');
+            }
+            
+            // 初始化置信度滑块事件
+            const confidenceSlider = document.getElementById('confidenceThreshold');
+            const confidenceValue = document.getElementById('confidenceValue');
+            
+            confidenceSlider.addEventListener('input', function() {
+                confidenceValue.textContent = this.value;
+            });
+            
+            // 根据检测模式显示/隐藏置信度选项
+            const detectionMode = document.getElementById('detectionMode');
+            const confidenceOption = document.querySelector('.confidence-option');
+            
+            detectionMode.addEventListener('change', function() {
+                if (this.value === 'confidence') {
+                    confidenceOption.style.display = 'flex';
+                } else {
+                    confidenceOption.style.display = 'none';
+                }
+            });
+        });
+
+        // 文件上传处理
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const preview = document.getElementById('preview');
+        const previewImage = document.getElementById('previewImage');
+        const progressBar = document.getElementById('progressBar');
+        const result = document.getElementById('result');
+        const originalImage = document.getElementById('originalImage');
+        const detectedImage = document.getElementById('detectedImage');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file && file.type.startsWith('image/')) {
+                handleFile(file);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                handleFile(file);
+            }
+        });
+
+        function handleFile(file) {
+            // 重置之前的检测结果和图表
+            resetDetectionResults();
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                previewImage.src = e.target.result;
+                originalImage.src = e.target.result;
+                preview.style.display = 'block';
+                result.style.display = 'none';
+            };
+            reader.readAsDataURL(file);
+        }
+
+        async function startDetection() {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            // 重置之前的检测结果和图表
+            resetDetectionResults();
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // 获取选项值
+            const confidenceThreshold = document.getElementById('confidenceThreshold').value;
+            const detectionMode = document.getElementById('detectionMode').value;
+            
+            // 添加选项参数
+            formData.append('confidence_threshold', confidenceThreshold);
+            formData.append('detection_mode', detectionMode);
+
+            progressBar.style.display = 'block';
+            const progressBarFill = progressBar.querySelector('.progress-bar');
+            progressBarFill.style.width = '0%';
+
+            try {
+                // 上传文件并开始检测
+                const response = await fetch('/api/upload-image', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error('上传失败');
+                }
+
+                const data = await response.json();
+                const { detection_id, filename } = data;
+
+                // 轮询检测状态
+                const checkStatus = async () => {
+                    const statusResponse = await fetch(`/api/detection-status/${detection_id}`);
+                    if (!statusResponse.ok) {
+                        throw new Error('获取状态失败');
+                    }
+
+                    const statusData = await statusResponse.json();
+                    
+                    if (statusData.status === 'processing') {
+                        progressBarFill.style.width = `${statusData.progress}%`;
+                        setTimeout(checkStatus, 1000); // 每秒检查一次
+                    } else if (statusData.status === 'completed') {
+                        progressBarFill.style.width = '100%';
+                        // 使用output_file路径显示检测结果图像
+                        if (statusData.output_file) {
+                            // 添加时间戳避免浏览器缓存
+                            const timestamp = new Date().getTime();
+                            detectedImage.src = `${statusData.output_file}?t=${timestamp}`;
+                            console.log("显示检测结果图像:", statusData.output_file);
+                        } else {
+                            // 如果没有output_file，则使用原始文件名构建路径
+                            const timestamp = new Date().getTime();
+                            detectedImage.src = `/processed/images/${filename}?t=${timestamp}`;
+                            console.log("使用原始文件名显示检测结果图像:", filename);
+                        }
+                        result.style.display = 'block';
+                        
+                        // 如果是热力图模式，隐藏缺陷信息
+                        const defectInfoSection = document.getElementById('defectInfo');
+                        if (detectionMode === 'heatmap') {
+                            defectInfoSection.style.display = 'none';
+                            // 为热力图模式添加一个提示信息
+                            const heatmapInfo = document.createElement('div');
+                            heatmapInfo.id = 'heatmapInfo';
+                            heatmapInfo.className = 'heatmap-info';
+                            heatmapInfo.innerHTML = `
+                                <div class="heatmap-info-content">
+                                    <i class="fas fa-info-circle"></i>
+                                    <h4>热力图检测模式</h4>
+                                    <p>热力图模式显示了图像中各区域的检测置信度，颜色越亮表示越有可能存在缺陷。</p>
+                                    <p>注意：热力图模式下不进行缺陷类型统计分析。</p>
+                                </div>
+                            `;
+                            
+                            // 检查是否已经存在热力图信息，避免重复添加
+                            const existingHeatmapInfo = document.getElementById('heatmapInfo');
+                            if (existingHeatmapInfo) {
+                                existingHeatmapInfo.remove();
+                            }
+                            
+                            // 在结果区域添加热力图信息
+                            document.getElementById('result').appendChild(heatmapInfo);
+                        } else {
+                            // 确保我们先清空任何旧的检测结果
+                            defectInfoSection.style.display = 'block';
+                            
+                            // 移除可能存在的热力图信息
+                            const existingHeatmapInfo = document.getElementById('heatmapInfo');
+                            if (existingHeatmapInfo) {
+                                existingHeatmapInfo.remove();
+                            }
+                            
+                            // 如果是置信度检测模式，添加特定的信息
+                            if (detectionMode === 'confidence') {
+                                // 检查是否已经存在置信度信息
+                                const existingConfidenceInfo = document.getElementById('confidenceInfo');
+                                if (existingConfidenceInfo) {
+                                    existingConfidenceInfo.remove();
+                                }
+                                
+                                // 添加置信度信息提示
+                                const confidenceInfo = document.createElement('div');
+                                confidenceInfo.id = 'confidenceInfo';
+                                confidenceInfo.className = 'confidence-info';
+                                confidenceInfo.innerHTML = `
+                                    <div class="confidence-info-content">
+                                        <i class="fas fa-chart-line"></i>
+                                        <h4>置信度检测模式</h4>
+                                        <p>置信度检测模式应用了阈值 ${confidenceThreshold}，仅显示置信度高于阈值的区域。</p>
+                                        <p>低于置信度阈值的区域被视为背景。</p>
+                                    </div>
+                                `;
+                                
+                                // 在缺陷信息区域前插入置信度信息
+                                defectInfoSection.insertAdjacentElement('beforebegin', confidenceInfo);
+                            } else {
+                                // 如果不是置信度模式，移除可能存在的置信度信息
+                                const existingConfidenceInfo = document.getElementById('confidenceInfo');
+                                if (existingConfidenceInfo) {
+                                    existingConfidenceInfo.remove();
+                                }
+                            }
+                            
+                            // 获取最新的检测信息（优先使用detection_info）
+                            let defectData = null;
+                            if (statusData.detection_info && Object.keys(statusData.detection_info).length > 0) {
+                                console.log("使用detection_info显示缺陷数据:", statusData.detection_info);
+                                defectData = statusData.detection_info;
+                            } 
+                            // 兼容旧版本，如果没有detection_info则使用defect_counts
+                            else if (statusData.defect_counts && Object.keys(statusData.defect_counts).length > 0) {
+                                console.log("使用defect_counts显示缺陷数据:", statusData.defect_counts);
+                                defectData = statusData.defect_counts;
+                            }
+                            
+                            // 如果有检测数据，显示它
+                            if (defectData) {
+                                displayDefectInfo(defectData);
+                            } else {
+                                console.warn("没有可用的缺陷数据");
+                            }
+                        }
+                        
+                        setTimeout(() => {
+                            progressBar.style.display = 'none';
+                            progressBarFill.style.width = '0%';
+                        }, 1000);
+                    } else if (statusData.status === 'error') {
+                        throw new Error(statusData.error || '检测失败');
+                    }
+                };
+
+                // 开始检查状态
+                await checkStatus();
+
+            } catch (error) {
+                alert('检测失败：' + error.message);
+                progressBar.style.display = 'none';
+                progressBarFill.style.width = '0%';
+            }
+        }
+
+        // 重置检测结果和图表
+        function resetDetectionResults() {
+            console.log("重置检测结果和图表");
+            
+            // 清除缺陷表格
+            const tableBody = document.getElementById('defectsTableBody');
+            if (tableBody) {
+                tableBody.innerHTML = '';
+            }
+            
+            // 销毁旧的图表
+            if (window.defectPieChart) {
+                window.defectPieChart.destroy();
+                window.defectPieChart = null;
+            }
+            
+            // 隐藏结果区域
+            const defectInfo = document.getElementById('defectInfo');
+            if (defectInfo) {
+                defectInfo.style.display = 'none';
+            }
+            
+            // 移除热力图信息提示
+            const heatmapInfo = document.getElementById('heatmapInfo');
+            if (heatmapInfo) {
+                heatmapInfo.remove();
+            }
+            
+            // 隐藏检测结果区域
+            const resultElement = document.getElementById('result');
+            if (resultElement) {
+                resultElement.style.display = 'none';
+            }
+        }
+
+        // 显示缺陷信息
+        function displayDefectInfo(defectCounts) {
+            console.log("正在显示缺陷信息:", defectCounts);
+            const defectInfo = document.getElementById('defectInfo');
+            const tableBody = document.getElementById('defectsTableBody');
+            
+            // 确保先清空表格
+            tableBody.innerHTML = '';
+            
+            // 销毁旧图表
+            if (window.defectPieChart) {
+                window.defectPieChart.destroy();
+                window.defectPieChart = null;
+            }
+            
+            // 计算有缺陷的像素总数（排除背景类）
+            let hasDefects = false;
+            const totalDefectPixels = Object.entries(defectCounts).reduce((sum, [type, count]) => {
+                // 检查是否有任何缺陷类型的计数大于0
+                if (type !== 'background' && count > 0) {
+                    hasDefects = true;
+                    return sum + count;
+                }
+                return sum;
+            }, 0);
+            
+            console.log("缺陷像素总数:", totalDefectPixels, "是否有缺陷:", hasDefects);
+            
+            // 显示缺陷信息区域
+            defectInfo.style.display = 'block';
+            
+            // 检查是否有缺陷
+            if (!hasDefects || totalDefectPixels === 0) {
+                // 无缺陷情况
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="no-defects-message">
+                            <div class="no-defects-content">
+                                <i class="fas fa-check-circle"></i>
+                                <h4>检测结果正常</h4>
+                                <p>未检测到任何缺陷</p>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                
+                // 创建"无缺陷"图表
+                const ctx = document.getElementById('defectChart').getContext('2d');
+                window.defectPieChart = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['正常'],
+                        datasets: [{
+                            data: [100],
+                            backgroundColor: ['#28a745'],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            title: {
+                                display: true,
+                                text: '检测结果：无缺陷',
+                                font: {
+                                    size: 16,
+                                    weight: 'bold'
+                                }
+                            }
+                        }
+                    }
+                });
+                return;
+            }
+            
+            // 有缺陷情况的处理
+            const defectTypes = {
+                'scratches': { name: 'scratches', color: 'yellow', description: '表面划痕' },
+                'inclusion': { name: 'inclusion', color: 'rgb(0, 128, 0)', description: '内部包裹体' },
+                'patches': { name: 'patches', color: 'rgb(128, 0, 0)', description: '表面贴片' },
+                'other': { name: 'other', color: 'blue', description: '其他缺陷' }
+            };
+            
+            // 准备图表数据
+            const chartLabels = [];
+            const chartData = [];
+            const chartColors = [];
+            
+            // 填充表格和准备图表数据
+            for (const [type, count] of Object.entries(defectCounts)) {
+                if (defectTypes[type] && count > 0) {
+                    const percentage = ((count / totalDefectPixels) * 100).toFixed(2);
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${defectTypes[type].name}</td>
+                        <td><span class="color-box" style="background-color: ${defectTypes[type].color}"></span></td>
+                        <td>${count}</td>
+                        <td>${percentage}%</td>
+                    `;
+                    tableBody.appendChild(row);
+                    
+                    chartLabels.push(`${defectTypes[type].name}`);
+                    chartData.push(count);
+                    chartColors.push(defectTypes[type].color);
+                }
+            }
+            
+            // 绘制饼图
+            const ctx = document.getElementById('defectChart').getContext('2d');
+            window.defectPieChart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: chartLabels,
+                    datasets: [{
+                        data: chartData,
+                        backgroundColor: chartColors,
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                font: {
+                                    size: 14
+                                }
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: '缺陷类型分布',
+                            font: {
+                                size: 16,
+                                weight: 'bold'
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const label = context.label || '';
+                                    const value = context.raw;
+                                    const percentage = ((value / totalDefectPixels) * 100).toFixed(2);
+                                    return `${label}: ${value} (${percentage}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+
+    <style>
+        .subtitle {
+            color: var(--text-secondary-light);
+            margin-bottom: 2rem;
+        }
+
+        .dark-theme .subtitle {
+            color: var(--text-secondary-dark);
+        }
+
+        /* 热力图信息样式 */
+        .heatmap-info {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background-color: var(--card-bg-light, #fff);
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #17a2b8;
+        }
+        
+        .dark-theme .heatmap-info {
+            background-color: var(--card-bg-dark, #2a2a2a);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        
+        .heatmap-info-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            color: #17a2b8;
+        }
+        
+        .heatmap-info-content i {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .heatmap-info-content h4 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            color: #17a2b8;
+        }
+        
+        .heatmap-info-content p {
+            font-size: 1rem;
+            color: #666;
+            margin: 0.3rem 0;
+        }
+        
+        .dark-theme .heatmap-info-content p {
+            color: #aaa;
+        }
+        
+        /* 置信度信息样式 */
+        .confidence-info {
+            margin: 2rem 0;
+            padding: 1.5rem;
+            background-color: var(--card-bg-light, #fff);
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #6f42c1;
+        }
+        
+        .dark-theme .confidence-info {
+            background-color: var(--card-bg-dark, #2a2a2a);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        
+        .confidence-info-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            color: #6f42c1;
+        }
+        
+        .confidence-info-content i {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .confidence-info-content h4 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            color: #6f42c1;
+        }
+        
+        .confidence-info-content p {
+            font-size: 1rem;
+            color: #666;
+            margin: 0.3rem 0;
+        }
+        
+        .dark-theme .confidence-info-content p {
+            color: #aaa;
+        }
+
+        .detection-options {
+            margin: 1.5rem 0;
+            background-color: var(--card-bg-light);
+            border-radius: 8px;
+            padding: 1rem;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .dark-theme .detection-options {
+            background-color: var(--card-bg-dark);
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+
+        .option-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .option-group:last-child {
+            margin-bottom: 0;
+        }
+
+        .option-group label {
+            width: 120px;
+            font-weight: 600;
+        }
+
+        .option-group input[type="range"] {
+            flex: 1;
+            margin: 0 10px;
+        }
+
+        .option-group span {
+            width: 40px;
+            text-align: center;
+        }
+
+        .option-group select {
+            flex: 1;
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            background-color: white;
+        }
+
+        .dark-theme .option-group select {
+            background-color: #333;
+            color: white;
+            border-color: #444;
+        }
+
+        .image-preview {
+            margin: 2rem 0;
+            text-align: center;
+        }
+
+        .image-preview img {
+            max-width: 100%;
+            max-height: 400px;
+            border-radius: 8px;
+        }
+
+        .result-images {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .result-images img {
+            max-width: 100%;
+            border-radius: 8px;
+        }
+
+        .result-images h3 {
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .result-images {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .dragover {
+            border-color: var(--primary-light);
+            background-color: rgba(0, 122, 255, 0.05);
+        }
+
+        .nav-logo {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: inherit;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        /* 缺陷信息样式 */
+        .defect-info {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background-color: var(--card-bg-light, #fff);
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .dark-theme .defect-info {
+            background-color: var(--card-bg-dark, #2a2a2a);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        
+        .defect-stats {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            margin-top: 1.5rem;
+            gap: 2rem;
+        }
+        
+        .stats-container {
+            flex: 1;
+            min-width: 300px;
+        }
+        
+        .chart-container {
+            flex: 1;
+            min-width: 300px;
+            max-width: 400px;
+        }
+        
+        .defect-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .defect-table th, .defect-table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        }
+        
+        .dark-theme .defect-table th, .dark-theme .defect-table td {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .color-box {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+        }
+        
+        @media (max-width: 992px) {
+            .defect-stats {
+                flex-direction: column;
+            }
+        }
+
+        /* 添加无缺陷消息样式 */
+        .no-defects-message {
+            text-align: center;
+            padding: 2rem !important;
+        }
+
+        .no-defects-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: #28a745;
+        }
+
+        .no-defects-content i {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            animation: bounceIn 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+        }
+
+        .no-defects-content h4 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: #28a745;
+        }
+
+        .no-defects-content p {
+            font-size: 1rem;
+            color: #666;
+            margin: 0;
+        }
+
+        .dark-theme .no-defects-content p {
+            color: #aaa;
+        }
+
+        @keyframes bounceIn {
+            0% {
+                opacity: 0;
+                transform: scale(0.3);
+            }
+            50% {
+                opacity: 0.9;
+                transform: scale(1.1);
+            }
+            80% {
+                opacity: 1;
+                transform: scale(0.89);
+            }
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+    </style>
+</body>
+</html> 

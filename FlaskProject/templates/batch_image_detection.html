@@ -1,0 +1,1343 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图像批量检测 - 智能图像分析系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .upload-area {
+            border: 2px dashed var(--border-light);
+            border-radius: 10px;
+            padding: 2rem;
+            text-align: center;
+            margin: 2rem 0;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .dark-theme .upload-area {
+            border-color: var(--border-dark);
+        }
+        
+        .upload-area:hover {
+            border-color: var(--primary-light);
+            background-color: rgba(0, 0, 0, 0.02);
+        }
+        
+        .dark-theme .upload-area:hover {
+            border-color: var(--primary-dark);
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        
+        .upload-area i {
+            color: var(--text-secondary-light);
+            margin-bottom: 1rem;
+        }
+        
+        .dark-theme .upload-area i {
+            color: var(--text-secondary-dark);
+        }
+        
+        .upload-area p {
+            margin: 0.5rem 0;
+            color: var(--text-secondary-light);
+        }
+        
+        .dark-theme .upload-area p {
+            color: var(--text-secondary-dark);
+        }
+        
+        .upload-hint {
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+        
+        .selected-files {
+            margin: 2rem 0;
+            border: 1px solid var(--border-light);
+            border-radius: 10px;
+            padding: 1.5rem;
+            background-color: var(--card-bg-light);
+        }
+        
+        .dark-theme .selected-files {
+            border-color: var(--border-dark);
+            background-color: var(--card-bg-dark);
+        }
+        
+        .file-list {
+            max-height: 300px;
+            overflow-y: auto;
+            margin: 1rem 0;
+        }
+        
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 0.7rem;
+            border-bottom: 1px solid var(--border-light);
+        }
+        
+        .dark-theme .file-item {
+            border-bottom: 1px solid var(--border-dark);
+        }
+        
+        .file-item:last-child {
+            border-bottom: none;
+        }
+        
+        .file-icon {
+            margin-right: 1rem;
+            font-size: 1.2rem;
+            color: var(--primary-light);
+        }
+        
+        .dark-theme .file-icon {
+            color: var(--primary-dark);
+        }
+        
+        .file-name {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .file-size {
+            color: var(--text-secondary-light);
+            margin-left: 1rem;
+            font-size: 0.9rem;
+        }
+        
+        .dark-theme .file-size {
+            color: var(--text-secondary-dark);
+        }
+        
+        .batch-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .progress-container {
+            margin: 2rem 0;
+        }
+        
+        .progress {
+            height: 10px;
+            background-color: var(--border-light);
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 1rem 0;
+        }
+        
+        .dark-theme .progress {
+            background-color: var(--border-dark);
+        }
+        
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(45deg, var(--primary-light), var(--secondary-light));
+            border-radius: 5px;
+            transition: width 0.3s ease;
+        }
+        
+        .dark-theme .progress-bar {
+            background: linear-gradient(45deg, var(--primary-dark), var(--secondary-dark));
+        }
+        
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            color: var(--text-secondary-light);
+        }
+        
+        .dark-theme .progress-info {
+            color: var(--text-secondary-dark);
+        }
+        
+        .batch-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
+        
+        .summary-item {
+            background-color: var(--card-bg-light);
+            border-radius: 10px;
+            padding: 1.5rem;
+            text-align: center;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .dark-theme .summary-item {
+            background-color: var(--card-bg-dark);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+        }
+        
+        .summary-item i {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+        
+        .summary-item:nth-child(1) i {
+            color: #4caf50;
+        }
+        
+        .summary-item:nth-child(2) i {
+            color: #ff9800;
+        }
+        
+        .summary-item:nth-child(3) i {
+            color: #f44336;
+        }
+        
+        .summary-item span {
+            margin-bottom: 0.5rem;
+            color: var(--text-secondary-light);
+        }
+        
+        .dark-theme .summary-item span {
+            color: var(--text-secondary-dark);
+        }
+        
+        .summary-item strong {
+            font-size: 2rem;
+            font-weight: 700;
+        }
+        
+        .results-filter {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .filter-btn {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--border-light);
+            border-radius: 20px;
+            background: none;
+            cursor: pointer;
+            transition: all 0.3s;
+            color: var(--text-primary-light);
+        }
+        
+        .dark-theme .filter-btn {
+            border-color: var(--border-dark);
+            color: var(--text-primary-dark);
+        }
+        
+        .filter-btn.active,
+        .filter-btn:hover {
+            background-color: var(--primary-light);
+            color: white;
+            border-color: var(--primary-light);
+        }
+        
+        .dark-theme .filter-btn.active,
+        .dark-theme .filter-btn:hover {
+            background-color: var(--primary-dark);
+            border-color: var(--primary-dark);
+        }
+        
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-top: 2rem;
+        }
+        
+        .result-card {
+            background-color: var(--card-bg-light);
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        
+        .dark-theme .result-card {
+            background-color: var(--card-bg-dark);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .result-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+        }
+        
+        .dark-theme .result-card:hover {
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        }
+        
+        .result-image {
+            position: relative;
+            aspect-ratio: 16 / 9;
+            overflow: hidden;
+        }
+        
+        .result-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        
+        .result-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: white;
+        }
+        
+        .badge-success {
+            background-color: #4caf50;
+        }
+        
+        .badge-error {
+            background-color: #f44336;
+        }
+        
+        .badge-defect {
+            background-color: #ff9800;
+        }
+        
+        .badge-no-defect {
+            background-color: #2196f3;
+        }
+        
+        .result-info {
+            padding: 1.2rem;
+        }
+        
+        .result-filename {
+            font-size: 1rem;
+            margin: 0 0 0.5rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .result-status {
+            color: var(--text-secondary-light);
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+        
+        .dark-theme .result-status {
+            color: var(--text-secondary-dark);
+        }
+        
+        .result-actions {
+            display: flex;
+            gap: 0.8rem;
+        }
+        
+        .action-btn {
+            flex: 1;
+            padding: 0.5rem;
+            text-align: center;
+            border-radius: 5px;
+            color: white;
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+        
+        .btn-view {
+            background-color: var(--primary-light);
+        }
+        
+        .dark-theme .btn-view {
+            background-color: var(--primary-dark);
+        }
+        
+        .btn-download {
+            background-color: #4caf50;
+        }
+        
+        .file-remove {
+            background: none;
+            border: none;
+            color: #f44336;
+            cursor: pointer;
+            margin-left: 8px;
+            opacity: 0.7;
+            transition: opacity 0.3s;
+        }
+        
+        .file-remove:hover {
+            opacity: 1;
+        }
+        
+        .dark-theme .file-remove {
+            color: #ff5252;
+        }
+        
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            overflow: auto;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .modal.show {
+            opacity: 1;
+        }
+        
+        .modal-content {
+            background-color: var(--surface-light);
+            width: 90%;
+            max-width: 1000px;
+            border-radius: 15px;
+            box-shadow: 0 5px 30px rgba(0, 0, 0, 0.3);
+            position: relative;
+            padding: 2rem;
+            margin: 2rem auto;
+            max-height: 90vh;
+            overflow: auto;
+            transform: translateY(20px);
+            transition: transform 0.3s ease;
+        }
+        
+        .modal.show .modal-content {
+            transform: translateY(0);
+        }
+        
+        .dark-theme .modal-content {
+            background-color: var(--surface-dark);
+            box-shadow: 0 5px 30px rgba(0, 0, 0, 0.5);
+        }
+        
+        .close {
+            position: absolute;
+            top: 1rem;
+            right: 1.5rem;
+            font-size: 2rem;
+            color: var(--text-secondary-light);
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .dark-theme .close {
+            color: var(--text-secondary-dark);
+        }
+        
+        .close:hover {
+            color: var(--primary-light);
+        }
+        
+        .dark-theme .close:hover {
+            color: var(--primary-dark);
+        }
+        
+        .image-comparison {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2rem;
+            margin: 2rem 0;
+        }
+        
+        .comparison-item {
+            flex: 1;
+            min-width: 300px;
+        }
+        
+        .comparison-item h3 {
+            margin-bottom: 1rem;
+            color: var(--text-primary-light);
+            border-bottom: 2px solid var(--primary-light);
+            padding-bottom: 0.5rem;
+            display: inline-block;
+        }
+        
+        .dark-theme .comparison-item h3 {
+            color: var(--text-primary-dark);
+            border-bottom-color: var(--primary-dark);
+        }
+        
+        .comparison-item img {
+            width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            object-fit: contain;
+            max-height: 50vh;
+        }
+        
+        .dark-theme .comparison-item img {
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+        
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+        
+        @media (max-width: 768px) {
+            .image-comparison {
+                flex-direction: column;
+            }
+            
+            .modal-content {
+                padding: 1.5rem;
+            }
+        }
+        
+        /* 检测选项样式优化 */
+        .detection-options {
+            margin: 1.5rem 0;
+            background-color: var(--card-bg-light);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .dark-theme .detection-options {
+            background-color: var(--card-bg-dark);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+        }
+        
+        .option-group {
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 1.5rem;
+        }
+        
+        .option-group:last-child {
+            margin-bottom: 0;
+        }
+        
+        .option-group label {
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: var(--text-primary-light);
+        }
+        
+        .dark-theme .option-group label {
+            color: var(--text-primary-dark);
+        }
+        
+        .form-select {
+            width: 100%;
+            padding: 0.75rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-light);
+            background-color: var(--surface-light);
+            color: var(--text-primary-light);
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+        
+        .dark-theme .form-select {
+            background-color: var(--surface-dark);
+            border-color: var(--border-dark);
+            color: var(--text-primary-dark);
+        }
+        
+        .form-select:focus {
+            outline: none;
+            border-color: var(--primary-light);
+            box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+        }
+        
+        .dark-theme .form-select:focus {
+            border-color: var(--primary-dark);
+            box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
+        }
+        
+        /* 置信度滑块容器样式 */
+        .confidence-slider-container {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .confidence-slider-container input[type="range"] {
+            flex: 1;
+            height: 6px;
+            -webkit-appearance: none;
+            background: linear-gradient(to right, var(--primary-light) 0%, var(--primary-light) 60%, #ddd 60%, #ddd 100%);
+            border-radius: 3px;
+            outline: none;
+        }
+        
+        .dark-theme .confidence-slider-container input[type="range"] {
+            background: linear-gradient(to right, var(--primary-dark) 0%, var(--primary-dark) 60%, #444 60%, #444 100%);
+        }
+        
+        .confidence-slider-container input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            background-color: var(--primary-light);
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        
+        .dark-theme .confidence-slider-container input[type="range"]::-webkit-slider-thumb {
+            background-color: var(--primary-dark);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+        }
+        
+        .confidence-slider-container input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.1);
+        }
+        
+        .confidence-slider-container span {
+            min-width: 40px;
+            text-align: center;
+            font-weight: 600;
+            color: var(--primary-light);
+        }
+        
+        .dark-theme .confidence-slider-container span {
+            color: var(--primary-dark);
+        }
+        
+        /* 置信度描述样式 */
+        .confidence-description {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            color: var(--text-secondary-light);
+            margin-top: 0.5rem;
+        }
+        
+        .dark-theme .confidence-description {
+            color: var(--text-secondary-dark);
+        }
+        
+        .confidence-description i {
+            color: var(--primary-light);
+        }
+        
+        .dark-theme .confidence-description i {
+            color: var(--primary-dark);
+        }
+        
+        /* 热力图结果样式 */
+        .heatmap-result {
+            border: 2px solid #17a2b8;
+            box-shadow: 0 0 8px rgba(23, 162, 184, 0.5);
+        }
+        
+        .dark-theme .heatmap-result {
+            box-shadow: 0 0 8px rgba(23, 162, 184, 0.8);
+        }
+        
+        /* 热力图模式标记 */
+        .badge-heatmap {
+            background-color: #17a2b8;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-content">
+            <a href="/" class="nav-logo">
+                <i class="fas fa-arrow-left"></i>
+                <span>返回首页</span>
+            </a>
+            <button class="theme-toggle" onclick="toggleTheme()">
+                <i class="fas fa-moon"></i>
+            </button>
+        </div>
+    </nav>
+
+    <div class="container" style="margin-top: 80px;">
+        <div class="card fade-in">
+            <h1><i class="fas fa-images"></i> 图像批量检测</h1>
+            <p class="subtitle">上传多张图片进行批量智能分析和检测</p>
+
+            <div class="upload-area" id="dropZone">
+                <i class="fas fa-cloud-upload-alt fa-3x"></i>
+                <p>拖拽图片到这里或点击上传</p>
+                <p class="upload-hint">支持jpg、png、jpeg、bmp格式的图片</p>
+                <input type="file" id="fileInput" accept="image/*" multiple style="display: none;">
+            </div>
+            
+            <div class="detection-options">
+                <div class="option-group">
+                    <label for="detectionMode">检测模式:</label>
+                    <select id="detectionMode" class="form-select">
+                        <option value="predict">普通检测</option>
+                        <option value="confidence">置信度检测</option>
+                        <option value="heatmap">热力图检测</option>
+                    </select>
+                </div>
+                <div class="option-group confidence-option" style="display: none;">
+                    <label for="confidenceThreshold">置信度阈值:</label>
+                    <div class="confidence-slider-container">
+                        <input type="range" id="confidenceThreshold" min="0.1" max="0.9" step="0.1" value="0.6">
+                        <span id="confidenceValue">0.6</span>
+                    </div>
+                    <div class="confidence-description">
+                        <i class="fas fa-info-circle"></i>
+                        <span>较高的阈值会减少误检，但可能漏检部分缺陷</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="selected-files" id="selectedFiles" style="display: none;">
+                <h3><i class="fas fa-list"></i> 已选择的文件</h3>
+                <div class="file-list" id="fileList"></div>
+                
+                <div class="batch-actions">
+                    <button class="btn btn-secondary" onclick="clearFiles()">
+                        <i class="fas fa-times"></i> 清除
+                    </button>
+                    <button class="btn btn-primary" onclick="startBatchDetection()">
+                        <i class="fas fa-play"></i> 开始批量检测
+                    </button>
+                </div>
+            </div>
+
+            <div class="progress-container" id="progressContainer" style="display: none;">
+                <h3>检测进度</h3>
+                <div class="progress">
+                    <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                </div>
+                <div class="progress-info">
+                    <span id="progressText">0%</span>
+                    <span id="progressStatus">已完成: 0 / 0</span>
+                </div>
+            </div>
+
+            <div id="batchResults" style="display: none;">
+                <h2>批量检测结果</h2>
+                <div class="batch-summary">
+                    <div class="summary-item">
+                        <i class="fas fa-check-circle"></i>
+                        <span>处理完成</span>
+                        <strong id="completedCount">0</strong>
+                    </div>
+                    <div class="summary-item">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <span>处理失败</span>
+                        <strong id="failedCount">0</strong>
+                    </div>
+                    <div class="summary-item">
+                        <i class="fas fa-exclamation-circle"></i>
+                        <span>发现缺陷</span>
+                        <strong id="defectCount">0</strong>
+                    </div>
+                </div>
+                
+                <div class="results-filter">
+                    <button class="filter-btn active" data-filter="all">全部</button>
+                    <button class="filter-btn" data-filter="success">成功</button>
+                    <button class="filter-btn" data-filter="failed">失败</button>
+                    <button class="filter-btn" data-filter="defect">有缺陷</button>
+                    <button class="filter-btn" data-filter="no-defect">无缺陷</button>
+                    <button class="filter-btn" data-filter="heatmap">热力图</button>
+                </div>
+                
+                <div class="results-grid" id="resultsGrid"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 主题切换功能
+        function toggleTheme() {
+            document.body.classList.toggle('dark-theme');
+            const themeIcon = document.querySelector('.theme-toggle i');
+            if (document.body.classList.contains('dark-theme')) {
+                themeIcon.classList.replace('fa-moon', 'fa-sun');
+                localStorage.setItem('theme', 'dark');
+            } else {
+                themeIcon.classList.replace('fa-sun', 'fa-moon');
+                localStorage.setItem('theme', 'light');
+            }
+        }
+
+        // 应用保存的主题偏好
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme === 'dark') {
+                document.body.classList.add('dark-theme');
+                document.querySelector('.theme-toggle i').classList.replace('fa-moon', 'fa-sun');
+            }
+            
+            // 初始化置信度滑块事件
+            const confidenceSlider = document.getElementById('confidenceThreshold');
+            const confidenceValue = document.getElementById('confidenceValue');
+            const detectionMode = document.getElementById('detectionMode');
+            const confidenceOption = document.querySelector('.confidence-option');
+            
+            // 更新滑块背景
+            function updateSliderBackground(value) {
+                const percentage = ((value - 0.1) / 0.8) * 100;
+                confidenceSlider.style.background = `linear-gradient(to right, var(--primary-light) 0%, var(--primary-light) ${percentage}%, #ddd ${percentage}%, #ddd 100%)`;
+                if (document.body.classList.contains('dark-theme')) {
+                    confidenceSlider.style.background = `linear-gradient(to right, var(--primary-dark) 0%, var(--primary-dark) ${percentage}%, #444 ${percentage}%, #444 100%)`;
+                }
+            }
+            
+            // 初始化滑块值和背景
+            confidenceValue.textContent = confidenceSlider.value;
+            updateSliderBackground(confidenceSlider.value);
+            
+            // 监听滑块变化
+            confidenceSlider.addEventListener('input', function() {
+                confidenceValue.textContent = this.value;
+                updateSliderBackground(this.value);
+            });
+            
+            // 监听检测模式变化
+            detectionMode.addEventListener('change', function() {
+                if (this.value === 'confidence') {
+                    confidenceOption.style.display = 'block';
+                } else {
+                    confidenceOption.style.display = 'none';
+                }
+            });
+            
+            // 监听主题变化
+            const observer = new MutationObserver(function(mutations) {
+                mutations.forEach(function(mutation) {
+                    if (mutation.target.classList.contains('dark-theme')) {
+                        updateSliderBackground(confidenceSlider.value);
+                    }
+                });
+            });
+            
+            observer.observe(document.body, {
+                attributes: true,
+                attributeFilter: ['class']
+            });
+            
+            // 设置文件上传相关事件
+            initFileUpload();
+            
+            // 设置过滤器按钮事件
+            initFilterButtons();
+        });
+
+        // 初始化文件上传功能
+        function initFileUpload() {
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('fileInput');
+            const selectedFiles = document.getElementById('selectedFiles');
+            const fileList = document.getElementById('fileList');
+            
+            // 处理拖拽上传
+            dropZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dropZone.classList.add('active');
+            });
+            
+            dropZone.addEventListener('dragleave', () => {
+                dropZone.classList.remove('active');
+            });
+            
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('active');
+                
+                const files = e.dataTransfer.files;
+                handleFiles(files);
+            });
+            
+            // 处理点击上传
+            dropZone.addEventListener('click', () => {
+                fileInput.click();
+            });
+            
+            fileInput.addEventListener('change', () => {
+                handleFiles(fileInput.files);
+            });
+        }
+        
+        // 处理选择的文件
+        function handleFiles(files) {
+            if (files.length === 0) return;
+            
+            const fileList = document.getElementById('fileList');
+            const selectedFiles = document.getElementById('selectedFiles');
+            
+            // 过滤新选择的图片文件
+            const newImageFiles = Array.from(files).filter(file => 
+                file.type.startsWith('image/') && 
+                ['jpg', 'jpeg', 'png', 'bmp'].includes(file.name.split('.').pop().toLowerCase())
+            );
+            
+            if (newImageFiles.length === 0) {
+                alert('请选择有效的图片文件（jpg、jpeg、png、bmp）');
+                return;
+            }
+            
+            console.log('新选择了 ' + newImageFiles.length + ' 个文件');
+            
+            // 初始化已选择的图片数组（如果不存在）
+            if (!window.selectedImageFiles) {
+                window.selectedImageFiles = [];
+            }
+            
+            // 将新选择的图片添加到已有图片中
+            window.selectedImageFiles = [...window.selectedImageFiles, ...newImageFiles];
+            
+            console.log('当前共有 ' + window.selectedImageFiles.length + ' 个文件');
+            
+            // 重新渲染文件列表
+            renderFileList();
+            
+            // 显示已选择的文件区域
+            selectedFiles.style.display = 'block';
+        }
+        
+        // 渲染文件列表
+        function renderFileList() {
+            const fileList = document.getElementById('fileList');
+            
+            // 清空当前列表
+            fileList.innerHTML = '';
+            
+            // 添加所有文件到列表
+            window.selectedImageFiles.forEach((file, index) => {
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                
+                const fileSize = formatFileSize(file.size);
+                
+                fileItem.innerHTML = `
+                    <i class="fas fa-image file-icon"></i>
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-size">${fileSize}</span>
+                    <button type="button" class="file-remove" onclick="removeFile(${index})">
+                        <i class="fas fa-times"></i>
+                    </button>
+                `;
+                
+                fileList.appendChild(fileItem);
+            });
+        }
+        
+        // 移除单个文件
+        function removeFile(index) {
+            if (!window.selectedImageFiles) return;
+            
+            // 移除指定索引的文件
+            window.selectedImageFiles.splice(index, 1);
+            
+            // 重新渲染文件列表
+            renderFileList();
+            
+            // 如果没有文件了，隐藏文件区域
+            if (window.selectedImageFiles.length === 0) {
+                document.getElementById('selectedFiles').style.display = 'none';
+            }
+        }
+        
+        // 格式化文件大小
+        function formatFileSize(bytes) {
+            if (bytes < 1024) {
+                return bytes + ' B';
+            } else if (bytes < 1024 * 1024) {
+                return (bytes / 1024).toFixed(2) + ' KB';
+            } else {
+                return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+            }
+        }
+        
+        // 清除已选文件
+        function clearFiles() {
+            // 清空文件数组
+            window.selectedImageFiles = [];
+            
+            // 清空显示
+            const fileList = document.getElementById('fileList');
+            const selectedFiles = document.getElementById('selectedFiles');
+            const fileInput = document.getElementById('fileInput');
+            
+            fileList.innerHTML = '';
+            selectedFiles.style.display = 'none';
+            fileInput.value = '';
+        }
+        
+        // 开始批量检测
+        async function startBatchDetection() {
+            if (!window.selectedImageFiles || window.selectedImageFiles.length === 0) {
+                alert('请先选择要检测的图片文件');
+                return;
+            }
+            
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const progressStatus = document.getElementById('progressStatus');
+            const selectedFiles = document.getElementById('selectedFiles');
+            
+            // 显示进度条
+            progressContainer.style.display = 'block';
+            
+            // 准备上传文件
+            const formData = new FormData();
+            
+            // 获取检测选项
+            const confidenceThreshold = document.getElementById('confidenceThreshold').value;
+            const detectionMode = document.getElementById('detectionMode').value;
+            
+            // 添加选项参数
+            formData.append('confidence_threshold', confidenceThreshold);
+            formData.append('detection_mode', detectionMode);
+            
+            // 记录文件数量以便调试
+            console.log(`准备上传 ${window.selectedImageFiles.length} 个文件`);
+            console.log(`检测模式: ${detectionMode}, 置信度阈值: ${confidenceThreshold}`);
+            
+            // 使用标准的多文件上传格式
+            window.selectedImageFiles.forEach((file, index) => {
+                formData.append('files[]', file);
+                console.log(`添加文件 ${index}: ${file.name} (${file.size} 字节)`);
+            });
+            
+            try {
+                // 上传文件并开始批量检测
+                console.log('开始发送请求...');
+                const response = await fetch('/api/upload-batch-images', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                console.log('收到响应');
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || '上传文件失败');
+                }
+                
+                console.log(`成功上传 ${data.file_count} 个文件，检测ID: ${data.detection_id}`);
+                
+                // 隐藏文件选择区域
+                selectedFiles.style.display = 'none';
+                
+                // 获取检测ID并开始轮询状态
+                const detectionId = data.detection_id;
+                const fileCount = data.file_count;
+                
+                progressStatus.textContent = `已完成: 0 / ${fileCount}`;
+                
+                // 开始轮询检测状态
+                pollDetectionStatus(detectionId);
+                
+            } catch (error) {
+                console.error('上传文件失败:', error);
+                alert('上传文件失败：' + error.message);
+                progressContainer.style.display = 'none';
+            }
+        }
+        
+        // 轮询检测状态
+        async function pollDetectionStatus(detectionId) {
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const progressStatus = document.getElementById('progressStatus');
+            const progressContainer = document.getElementById('progressContainer');
+            const batchResults = document.getElementById('batchResults');
+            
+            const pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/batch-detection-status/${detectionId}`);
+                    const statusData = await response.json();
+                    
+                    // 更新进度
+                    const progress = statusData.progress || 0;
+                    progressBar.style.width = `${progress}%`;
+                    progressText.textContent = `${progress}%`;
+                    progressStatus.textContent = `已完成: ${statusData.completed} / ${statusData.file_count}`;
+                    
+                    // 如果完成或出错，停止轮询
+                    if (statusData.status === 'completed' || statusData.status === 'error') {
+                        clearInterval(pollInterval);
+                        
+                        // 显示结果区域
+                        progressContainer.style.display = 'none';
+                        batchResults.style.display = 'block';
+                        
+                        // 更新结果统计
+                        updateResultsSummary(statusData);
+                        
+                        // 显示处理结果
+                        displayResults(statusData.results);
+                    }
+                    
+                } catch (error) {
+                    console.error('获取检测状态失败:', error);
+                }
+            }, 2000); // 每2秒轮询一次
+        }
+        
+        // 更新结果统计
+        function updateResultsSummary(statusData) {
+            document.getElementById('completedCount').textContent = statusData.completed || 0;
+            document.getElementById('failedCount').textContent = statusData.failed || 0;
+            
+            // 统计有缺陷的图像数
+            const defectCount = (statusData.results || []).filter(result => 
+                result.status === 'completed' && result.has_defects
+            ).length;
+            
+            document.getElementById('defectCount').textContent = defectCount;
+        }
+        
+        // 显示处理结果
+        function displayResults(results) {
+            if (!results || results.length === 0) return;
+            
+            console.log(`准备显示 ${results.length} 个结果`);
+            
+            const resultsGrid = document.getElementById('resultsGrid');
+            resultsGrid.innerHTML = '';
+            
+            results.forEach((result, index) => {
+                console.log(`显示结果 ${index+1}/${results.length}: ${result.filename}, 状态: ${result.status}`);
+                
+                // 确定结果类型和对应的徽章
+                let badgeClass = '';
+                let badgeText = '';
+                
+                if (result.status === 'error') {
+                    badgeClass = 'badge-error';
+                    badgeText = '处理失败';
+                } else if (result.has_defects) {
+                    badgeClass = 'badge-defect';
+                    badgeText = '有缺陷';
+                } else {
+                    badgeClass = 'badge-no-defect';
+                    badgeText = '无缺陷';
+                }
+                
+                // 检查是否是热力图模式
+                const isHeatmapMode = result.detection_mode === 'heatmap';
+                if (isHeatmapMode && result.status === 'completed') {
+                    badgeClass += ' badge-heatmap';
+                    badgeText = '热力图' + badgeText;
+                }
+                
+                // 显示的文件名
+                const displayFilename = result.original_filename || result.filename;
+                
+                // 创建结果卡片
+                const resultCard = document.createElement('div');
+                resultCard.className = `result-card ${result.status} ${result.has_defects ? 'has-defect' : 'no-defect'} ${isHeatmapMode ? 'heatmap-mode' : ''}`;
+                
+                // 保存文件名（带时间戳的）
+                const savedFilename = result.filename;
+                
+                // 卡片内容
+                resultCard.innerHTML = `
+                    <div class="result-image">
+                        <img src="${result.status === 'completed' ? '/batch/images/' + savedFilename + '?t=' + new Date().getTime() : '/static/images/error-placeholder.jpg'}" 
+                             alt="${displayFilename}" 
+                             onerror="this.src='/static/images/error-placeholder.jpg'"
+                             class="${isHeatmapMode ? 'heatmap-result' : ''}">
+                        <span class="result-badge ${badgeClass}">${badgeText}</span>
+                    </div>
+                    <div class="result-info">
+                        <h3 class="result-filename">${displayFilename}</h3>
+                        <p class="result-status">
+                            ${result.status === 'completed' 
+                                ? `状态: 处理完成${result.has_defects 
+                                    ? '，发现缺陷' 
+                                    : '，无缺陷'}${isHeatmapMode ? '，热力图模式' : ''}`
+                                : `状态: 处理失败 - ${result.error || '未知错误'}`}
+                        </p>
+                        <div class="result-actions">
+                            ${result.status === 'completed' ? `
+                                <a href="#" class="action-btn btn-view" onclick="viewImageDetail('${savedFilename}', '${savedFilename}', ${isHeatmapMode}); return false;">
+                                    <i class="fas fa-eye"></i> 查看
+                                </a>
+                                <a href="/batch/images/${savedFilename}?download=true" class="action-btn btn-download" download="${displayFilename}_${isHeatmapMode ? '热力图' : '检测结果'}.jpg">
+                                    <i class="fas fa-download"></i> 下载
+                                </a>
+                            ` : `
+                                <span class="action-btn btn-view disabled">
+                                    <i class="fas fa-eye-slash"></i> 无法查看
+                                </span>
+                            `}
+                        </div>
+                    </div>
+                `;
+                
+                resultsGrid.appendChild(resultCard);
+            });
+        }
+        
+        // 查看图像详情
+        function viewImageDetail(originalFilename, processedFilename, isHeatmapMode) {
+            try {
+                // 删除可能存在的旧模态框
+                const existingModal = document.querySelector('.modal');
+                if (existingModal) {
+                    existingModal.remove();
+                }
+                
+                console.log("查看图像详情:", originalFilename, processedFilename, isHeatmapMode ? "热力图模式" : "普通模式");
+                
+                // 创建模态框
+                const modal = document.createElement('div');
+                modal.className = 'modal';
+                modal.id = 'imageDetailModal';
+                
+                // 生成时间戳，防止缓存
+                const timestamp = new Date().getTime();
+                
+                // 创建模态框内容
+                modal.innerHTML = `
+                    <div class="modal-content">
+                        <span class="close" onclick="closeModal()">&times;</span>
+                        <h2>${isHeatmapMode ? '热力图' : '图像检测'}详情</h2>
+                        <div class="image-comparison">
+                            <div class="comparison-item">
+                                <h3>原始图像</h3>
+                                <img src="/original/images/${originalFilename}?t=${timestamp}" alt="原始图像" 
+                                     onerror="this.src='/static/images/error-placeholder.jpg'; this.style.padding='2rem'; this.style.background='#f5f5f5';">
+                            </div>
+                            <div class="comparison-item">
+                                <h3>${isHeatmapMode ? '热力图结果' : '检测结果'}</h3>
+                                <img src="/batch/images/${processedFilename}?t=${timestamp}" alt="${isHeatmapMode ? '热力图' : '检测结果'}" 
+                                     onerror="this.src='/static/images/error-placeholder.jpg'; this.style.padding='2rem'; this.style.background='#f5f5f5';"
+                                     class="${isHeatmapMode ? 'heatmap-result' : ''}">
+                            </div>
+                        </div>
+                        <div class="modal-actions">
+                            <a href="/original/images/${originalFilename}?download=true" class="btn btn-secondary" download="原始图像.jpg">
+                                <i class="fas fa-download"></i> 下载原图
+                            </a>
+                            <a href="/batch/images/${processedFilename}?download=true" class="btn btn-primary" download="${isHeatmapMode ? '热力图' : '检测结果'}.jpg">
+                                <i class="fas fa-download"></i> 下载${isHeatmapMode ? '热力图' : '结果'}
+                            </a>
+                        </div>
+                    </div>
+                `;
+                
+                // 添加到文档
+                document.body.appendChild(modal);
+                
+                // 防止滚动
+                document.body.style.overflow = 'hidden';
+                
+                // 触发重绘以应用动画
+                setTimeout(() => {
+                    modal.classList.add('show');
+                }, 10);
+                
+                // 监听ESC键关闭
+                document.addEventListener('keydown', function escListener(e) {
+                    if (e.key === 'Escape') {
+                        closeModal();
+                        document.removeEventListener('keydown', escListener);
+                    }
+                });
+                
+                // 点击模态框背景也关闭
+                modal.addEventListener('click', function(e) {
+                    if (e.target === modal) {
+                        closeModal();
+                    }
+                });
+                
+                // 预加载图片
+                const originalImg = new Image();
+                originalImg.src = `/original/images/${originalFilename}?t=${timestamp}`;
+                
+                const processedImg = new Image();
+                processedImg.src = `/batch/images/${processedFilename}?t=${timestamp}`;
+            } catch (error) {
+                console.error("查看图像详情出错:", error);
+                alert("查看图像详情失败: " + (error.message || error));
+            }
+        }
+        
+        // 关闭模态框
+        function closeModal() {
+            const modal = document.getElementById('imageDetailModal');
+            if (modal) {
+                modal.classList.remove('show');
+                setTimeout(() => {
+                    modal.remove();
+                    document.body.style.overflow = '';
+                }, 300);
+            }
+        }
+        
+        // 初始化过滤器按钮
+        function initFilterButtons() {
+            const filterButtons = document.querySelectorAll('.filter-btn');
+            
+            filterButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    // 更新活动按钮
+                    filterButtons.forEach(btn => btn.classList.remove('active'));
+                    button.classList.add('active');
+                    
+                    // 获取过滤条件
+                    const filter = button.dataset.filter;
+                    
+                    // 过滤结果
+                    filterResults(filter);
+                });
+            });
+        }
+        
+        // 过滤结果
+        function filterResults(filter) {
+            const resultCards = document.querySelectorAll('.result-card');
+            
+            resultCards.forEach(card => {
+                switch (filter) {
+                    case 'all':
+                        card.style.display = 'block';
+                        break;
+                    case 'success':
+                        card.style.display = card.classList.contains('completed') ? 'block' : 'none';
+                        break;
+                    case 'failed':
+                        card.style.display = card.classList.contains('error') ? 'block' : 'none';
+                        break;
+                    case 'defect':
+                        card.style.display = card.classList.contains('has-defect') ? 'block' : 'none';
+                        break;
+                    case 'no-defect':
+                        card.style.display = card.classList.contains('no-defect') ? 'block' : 'none';
+                        break;
+                    case 'heatmap':
+                        card.style.display = card.classList.contains('heatmap-mode') ? 'block' : 'none';
+                        break;
+                }
+            });
+        }
+    </script>
+</body>
+</html> 

@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能图像分析系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-content">
+            <h1>智能图像分析系统</h1>
+            <div class="nav-actions">
+                <div class="user-info">
+                    <i class="fas fa-user-circle"></i>
+                    <a href="/profile" class="username-link">{{ session.get('username', '用户') }}</a>
+                </div>
+                <a href="/logout" class="logout-btn">
+                    <i class="fas fa-sign-out-alt"></i> 退出
+                </a>
+                <button class="theme-toggle" onclick="toggleTheme()">
+                    <i class="fas fa-moon"></i>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container" style="margin-top: 80px;">
+        <div class="user-welcome">
+            <div class="welcome-card">
+                <div class="welcome-avatar">
+                    <i class="fas fa-user"></i>
+                </div>
+                <div class="welcome-text">
+                    <h2>欢迎回来，{{ session.get('username', '用户') }}</h2>
+                    <p>您可以使用下面的功能进行图像和视频分析</p>
+                </div>
+                <a href="/profile" class="profile-link">
+                    <i class="fas fa-user-cog"></i> 管理个人信息
+                </a>
+            </div>
+        </div>
+        
+        <div class="grid">
+            <div class="card fade-in" onclick="window.location.href='/image-detection'">
+                <i class="fas fa-image fa-3x"></i>
+                <h2>图像检测</h2>
+                <p>上传图片进行智能分析和检测</p>
+            </div>
+
+            <div class="card fade-in" onclick="window.location.href='/batch-image-detection'">
+                <i class="fas fa-images fa-3x"></i>
+                <h2>图像批量检测</h2>
+                <p>一次性上传多张图片进行批量分析</p>
+            </div>
+
+            <div class="card fade-in" onclick="window.location.href='/video-detection'">
+                <i class="fas fa-video fa-3x"></i>
+                <h2>视频检测</h2>
+                <p>上传视频进行智能分析和检测</p>
+            </div>
+
+            <div class="card fade-in" onclick="window.location.href='/camera-detection'">
+                <i class="fas fa-camera fa-3x"></i>
+                <h2>实时摄像头检测</h2>
+                <p>使用摄像头进行实时检测分析</p>
+            </div>
+            
+            <div class="card fade-in" onclick="window.location.href='/detection-records'">
+                <i class="fas fa-history fa-3x"></i>
+                <h2>检测记录</h2>
+                <p>查看所有图像和视频检测的历史记录</p>
+            </div>
+            
+            <div class="card fade-in analytics-card" onclick="window.location.href='/analytics'">
+                <i class="fas fa-chart-line fa-3x"></i>
+                <h2>统计分析</h2>
+                <p>深入了解检测数据，掌握质量趋势</p>
+                <div class="card-badge">实时数据</div>
+            </div>
+            
+            <div class="card fade-in" id="ai-chat-card">
+                <i class="fas fa-robot fa-3x"></i>
+                <h2>智能问答</h2>
+                <p>与AI助手进行智能对话，解答您的问题</p>
+            </div>
+            
+            {% if is_admin %}
+            <div class="card fade-in admin-card" onclick="window.location.href='/admin/users'">
+                <i class="fas fa-users-cog fa-3x"></i>
+                <h2>用户管理</h2>
+                <p>管理系统用户，添加或删除用户账号</p>
+                <div class="admin-badge">管理员</div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Coze SDK -->
+    <script src="https://lf-cdn.coze.cn/obj/unpkg/flow-platform/chat-app-sdk/1.2.0-beta.5/libs/cn/index.js"></script>
+
+    <script>
+        function toggleTheme() {
+            document.body.classList.toggle('dark-theme');
+            const themeIcon = document.querySelector('.theme-toggle i');
+            if (document.body.classList.contains('dark-theme')) {
+                themeIcon.classList.replace('fa-moon', 'fa-sun');
+                localStorage.setItem('theme', 'dark');
+            } else {
+                themeIcon.classList.replace('fa-sun', 'fa-moon');
+                localStorage.setItem('theme', 'light');
+            }
+        }
+
+        // 检查用户之前的主题偏好
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme === 'dark') {
+                document.body.classList.add('dark-theme');
+                document.querySelector('.theme-toggle i').classList.replace('fa-moon', 'fa-sun');
+            }
+            
+            // 初始化智能问答功能
+            const aiChatCard = document.getElementById('ai-chat-card');
+            aiChatCard.addEventListener('click', function() {
+                initCozeChat();
+            });
+        });
+        
+        // 初始化Coze智能体
+        function initCozeChat() {
+            new CozeWebSDK.WebChatClient({
+                config: {
+                    bot_id: '7487824471194697728',
+                },
+                componentProps: {
+                    title: '缺陷检测智能助手',
+                    description: '解答您关于缺陷检测、钢材质量的问题',
+                    primaryColor: '#007AFF',
+                    welcomeMessage: '您好！我是您的缺陷检测智能助手，请问有什么可以帮您的？',
+                    placeholder: '请输入您的问题...'
+                },
+                auth: {
+                    type: 'token',
+                    token: 'pat_oZT0xOr9nRvZAstbc9CDtoTHPR42AjqySFJvfUjbBnoG15f3mGfcL7oYv0dtBYmS',
+                    onRefreshToken: function() {
+                        return 'pat_oZT0xOr9nRvZAstbc9CDtoTHPR42AjqySFJvfUjbBnoG15f3mGfcL7oYv0dtBYmS';
+                    }
+                }
+            });
+        }
+    </script>
+
+    <style>
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            padding: 3rem 2rem;
+            cursor: pointer;
+        }
+
+        .card i {
+            margin-bottom: 1.5rem;
+            color: var(--primary-light);
+        }
+
+        .dark-theme .card i {
+            color: var(--primary-dark);
+        }
+
+        .card h2 {
+            margin-bottom: 1rem;
+        }
+
+        .card p {
+            color: var(--text-secondary-light);
+        }
+
+        .dark-theme .card p {
+            color: var(--text-secondary-dark);
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .nav-actions {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-primary-light);
+            font-weight: 500;
+        }
+        
+        .dark-theme .user-info {
+            color: var(--text-primary-dark);
+        }
+        
+        .user-info i {
+            font-size: 1.2rem;
+            color: var(--primary-light);
+        }
+        
+        .dark-theme .user-info i {
+            color: var(--primary-dark);
+        }
+        
+        .username-link {
+            color: var(--text-primary-light);
+            text-decoration: none;
+            transition: all 0.3s ease;
+        }
+        
+        .dark-theme .username-link {
+            color: var(--text-primary-dark);
+        }
+        
+        .username-link:hover {
+            color: var(--primary-light);
+        }
+        
+        .dark-theme .username-link:hover {
+            color: var(--primary-dark);
+        }
+        
+        .logout-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-primary-light);
+            text-decoration: none;
+            padding: 0.5rem 0.8rem;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+        
+        .dark-theme .logout-btn {
+            color: var(--text-primary-dark);
+        }
+        
+        .logout-btn:hover {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+        
+        .dark-theme .logout-btn:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        
+        .user-welcome {
+            margin-bottom: 2rem;
+        }
+        
+        /* 智能问答卡片特殊样式 */
+        #ai-chat-card {
+            position: relative;
+            overflow: hidden;
+            background: linear-gradient(135deg, rgba(0, 122, 255, 0.1), rgba(0, 122, 255, 0.05));
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+        }
+        
+        #ai-chat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(0, 122, 255, 0.2), rgba(0, 122, 255, 0.1));
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            z-index: -1;
+        }
+        
+        #ai-chat-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(0, 122, 255, 0.3);
+            box-shadow: 0 10px 20px rgba(0, 122, 255, 0.1);
+        }
+        
+        #ai-chat-card:hover::before {
+            opacity: 1;
+        }
+        
+        #ai-chat-card:active {
+            transform: translateY(-2px);
+        }
+        
+        .dark-theme #ai-chat-card {
+            background: linear-gradient(135deg, rgba(10, 132, 255, 0.15), rgba(10, 132, 255, 0.05));
+        }
+        
+        .dark-theme #ai-chat-card:hover {
+            border-color: rgba(10, 132, 255, 0.4);
+            box-shadow: 0 10px 20px rgba(10, 132, 255, 0.15);
+        }
+        
+        #ai-chat-card::after {
+            content: '点击打开';
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 122, 255, 0.8);
+            color: white;
+            font-size: 0.7rem;
+            padding: 3px 8px;
+            border-radius: 10px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s ease;
+        }
+        
+        #ai-chat-card:hover::after {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        
+        .dark-theme #ai-chat-card::after {
+            background: rgba(10, 132, 255, 0.8);
+        }
+        
+        .welcome-card {
+            background-color: var(--surface-light);
+            border-radius: 16px;
+            padding: 1.5rem;
+            display: flex;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            position: relative;
+        }
+        
+        .dark-theme .welcome-card {
+            background-color: var(--surface-dark);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+        }
+        
+        .welcome-avatar {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background-color: var(--primary-light);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-right: 1.5rem;
+            color: white;
+            font-size: 1.8rem;
+        }
+        
+        .dark-theme .welcome-avatar {
+            background-color: var(--primary-dark);
+        }
+        
+        .welcome-text h2 {
+            margin: 0;
+            margin-bottom: 0.5rem;
+            font-size: 1.5rem;
+        }
+        
+        .welcome-text p {
+            margin: 0;
+            color: var(--text-secondary-light);
+        }
+        
+        .dark-theme .welcome-text p {
+            color: var(--text-secondary-dark);
+        }
+        
+        .profile-link {
+            position: absolute;
+            right: 1.5rem;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            align-items: center;
+            padding: 0.8rem 1.2rem;
+            background-color: var(--primary-light);
+            color: white;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        
+        .dark-theme .profile-link {
+            background-color: var(--primary-dark);
+        }
+        
+        .profile-link i {
+            margin-right: 0.5rem;
+        }
+        
+        .profile-link:hover {
+            background-color: var(--button-hover-light);
+            transform: translateY(-50%) translateX(-2px);
+            box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
+        }
+        
+        .dark-theme .profile-link:hover {
+            background-color: var(--button-hover-dark);
+            box-shadow: 0 4px 12px rgba(10, 132, 255, 0.3);
+        }
+        
+        .admin-card {
+            position: relative;
+            border: 2px solid var(--primary-light);
+            overflow: hidden;
+        }
+        
+        .dark-theme .admin-card {
+            border-color: var(--primary-dark);
+        }
+        
+        .admin-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background-color: var(--primary-light);
+            color: white;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        
+        .dark-theme .admin-badge {
+            background-color: var(--primary-dark);
+        }
+
+        .analytics-card {
+            position: relative;
+            background: linear-gradient(135deg, #007AFF, #5856D6);
+            color: white;
+        }
+
+        .dark-theme .analytics-card {
+            background: linear-gradient(135deg, #0A84FF, #5E5CE6);
+        }
+
+        .analytics-card h2,
+        .analytics-card p,
+        .analytics-card i {
+            color: white;
+        }
+
+        .analytics-card .card-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            backdrop-filter: blur(4px);
+        }
+
+        .analytics-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(0, 122, 255, 0.3);
+        }
+
+        .dark-theme .analytics-card:hover {
+            box-shadow: 0 8px 25px rgba(10, 132, 255, 0.3);
+        }
+        
+        @media (max-width: 768px) {
+            .welcome-card {
+                flex-direction: column;
+                text-align: center;
+                padding: 2rem 1.5rem;
+            }
+            
+            .welcome-avatar {
+                margin-right: 0;
+                margin-bottom: 1rem;
+            }
+            
+            .profile-link {
+                position: static;
+                transform: none;
+                margin-top: 1.5rem;
+                justify-content: center;
+            }
+            
+            .profile-link:hover {
+                transform: translateY(-2px);
+            }
+        }
+    </style>
+</body>
+</html>

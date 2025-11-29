@@ -1,0 +1,472 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="admin-header">
+    <div class="header-left">
+        <h1><i class="fas fa-users-cog"></i> 用户管理</h1>
+        <p class="subtitle">管理系统用户账号和权限</p>
+    </div>
+    <div class="header-actions">
+        <a href="{{ url_for('index') }}" class="btn-action btn-home">
+            <i class="fas fa-home"></i>
+            <span>返回首页</span>
+        </a>
+        <a href="{{ url_for('admin_create_user_route') }}" class="btn-action btn-create">
+            <i class="fas fa-user-plus"></i>
+            <span>创建用户</span>
+        </a>
+        <a href="{{ url_for('logout') }}" class="btn-action btn-logout">
+            <i class="fas fa-sign-out-alt"></i>
+            <span>退出登录</span>
+        </a>
+    </div>
+</div>
+
+<div class="admin-content">
+    {% if users %}
+    <div class="users-table-container">
+        <table class="users-table">
+            <thead>
+                <tr>
+                    <th>用户名</th>
+                    <th>邮箱</th>
+                    <th>注册时间</th>
+                    <th>最后登录</th>
+                    <th>状态</th>
+                    <th>角色</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr class="{% if user.is_admin %}admin-row{% endif %}">
+                    <td><strong>{{ user.username }}</strong></td>
+                    <td>{{ user.email }}</td>
+                    <td>{{ user.created_at }}</td>
+                    <td>{{ user.last_login or '从未登录' }}</td>
+                    <td>
+                        <span class="status-badge {% if user.is_active %}active{% else %}inactive{% endif %}">
+                            {{ '激活' if user.is_active else '禁用' }}
+                        </span>
+                    </td>
+                    <td>
+                        {% if user.is_admin %}
+                        <span class="admin-tag">
+                            <i class="fas fa-crown"></i> 管理员
+                        </span>
+                        {% else %}
+                        <span class="user-tag">
+                            <i class="fas fa-user"></i> 普通用户
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td class="actions">
+                        {% if not user.is_admin %}
+                        <button class="btn-icon" onclick="toggleUserStatus('{{ user.id }}')" title="{{ '禁用' if user.is_active else '激活' }}用户">
+                            <i class="fas {% if user.is_active %}fa-ban{% else %}fa-check{% endif %}"></i>
+                        </button>
+                        <button class="btn-icon delete" onclick="deleteUser('{{ user.id }}')" title="删除用户">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                        {% else %}
+                        <span class="no-action">--</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if total_pages > 1 %}
+    <div class="pagination">
+        {% for p in range(1, total_pages + 1) %}
+        <a href="{{ url_for('admin_users', page=p) }}" 
+           class="page-link {% if p == page %}active{% endif %}">
+            {{ p }}
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="empty-state">
+        <i class="fas fa-users-slash"></i>
+        <h2>暂无用户</h2>
+        <p>系统中还没有任何用户，点击"创建用户"按钮创建第一个用户。</p>
+    </div>
+    {% endif %}
+</div>
+
+<style>
+    /* 引入Bootstap和FontAwesome的本地备份，确保图标正常显示 */
+    @import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css');
+    
+    .admin-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 2rem;
+        padding: 1.5rem;
+        background: var(--surface-light, #ffffff);
+        border-radius: 12px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+
+    .dark-theme .admin-header {
+        background: var(--surface-dark, #1c1c1e);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    }
+
+    .header-left {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .header-left h1 {
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        margin: 0;
+        font-size: 1.8rem;
+        color: var(--text-primary-light, #000000);
+    }
+
+    .dark-theme .header-left h1 {
+        color: var(--text-primary-dark, #ffffff);
+    }
+
+    .header-left i {
+        color: var(--primary-light, #007bff);
+    }
+
+    .dark-theme .header-left i {
+        color: var(--primary-dark, #0A84FF);
+    }
+
+    .subtitle {
+        color: var(--text-secondary-light, #6c757d);
+        margin: 0;
+    }
+
+    .dark-theme .subtitle {
+        color: var(--text-secondary-dark, #8e8e93);
+    }
+
+    .header-actions {
+        display: flex;
+        gap: 1rem;
+    }
+
+    .btn-action {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.8rem 1.2rem;
+        border-radius: 8px;
+        font-weight: 600;
+        text-decoration: none;
+        transition: all 0.3s ease;
+    }
+
+    .btn-home {
+        background-color: #6c757d;
+        color: white;
+    }
+
+    .btn-create {
+        background-color: var(--primary-light, #007bff);
+        color: white;
+    }
+
+    .dark-theme .btn-create {
+        background-color: var(--primary-dark, #0A84FF);
+    }
+
+    .btn-logout {
+        background-color: #dc3545;
+        color: white;
+    }
+
+    .btn-action:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        color: white;
+        text-decoration: none;
+    }
+
+    .btn-home:hover {
+        background-color: #5a6268;
+    }
+
+    .btn-create:hover {
+        background-color: var(--button-hover-light, #0056b3);
+    }
+
+    .dark-theme .btn-create:hover {
+        background-color: var(--button-hover-dark, #0769c6);
+    }
+
+    .btn-logout:hover {
+        background-color: #c82333;
+    }
+
+    .admin-content {
+        background: var(--surface-light, #ffffff);
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+
+    .dark-theme .admin-content {
+        background: var(--surface-dark, #1c1c1e);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    }
+
+    .users-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 1.5rem;
+    }
+
+    .users-table th {
+        padding: 1rem;
+        text-align: left;
+        border-bottom: 2px solid var(--border-color-light, #dee2e6);
+        font-weight: 600;
+        background-color: rgba(0,0,0,0.02);
+    }
+
+    .dark-theme .users-table th {
+        border-bottom: 2px solid var(--border-color-dark, #343a40);
+        background-color: rgba(255,255,255,0.05);
+    }
+
+    .users-table td {
+        padding: 1rem;
+        text-align: left;
+        border-bottom: 1px solid var(--border-color-light, #dee2e6);
+    }
+
+    .dark-theme .users-table td {
+        border-bottom: 1px solid var(--border-color-dark, #343a40);
+    }
+
+    .admin-row {
+        background-color: rgba(0, 123, 255, 0.05);
+    }
+
+    .dark-theme .admin-row {
+        background-color: rgba(10, 132, 255, 0.15);
+    }
+
+    .status-badge {
+        padding: 0.4rem 0.8rem;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .status-badge.active {
+        background-color: #28a745;
+        color: white;
+    }
+
+    .status-badge.inactive {
+        background-color: #dc3545;
+        color: white;
+    }
+
+    .btn-icon {
+        padding: 0.5rem;
+        border: none;
+        border-radius: 6px;
+        background: none;
+        color: var(--text-primary-light, #000000);
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+    .dark-theme .btn-icon {
+        color: var(--text-primary-dark, #ffffff);
+    }
+
+    .btn-icon:hover {
+        background-color: rgba(0,0,0,0.1);
+    }
+
+    .dark-theme .btn-icon:hover {
+        background-color: rgba(255,255,255,0.1);
+    }
+
+    .btn-icon.delete:hover {
+        color: #dc3545;
+        background-color: rgba(220, 53, 69, 0.1);
+    }
+
+    .dark-theme .btn-icon.delete:hover {
+        background-color: rgba(220, 53, 69, 0.2);
+    }
+
+    .admin-tag {
+        padding: 0.4rem 0.8rem;
+        background-color: var(--primary-light, #007bff);
+        color: white;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .dark-theme .admin-tag {
+        background-color: var(--primary-dark, #0A84FF);
+    }
+
+    .user-tag {
+        padding: 0.4rem 0.8rem;
+        background-color: #6c757d;
+        color: white;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .no-action {
+        color: var(--text-secondary-light, #6c757d);
+        font-style: italic;
+    }
+
+    .dark-theme .no-action {
+        color: var(--text-secondary-dark, #8e8e93);
+    }
+
+    .pagination {
+        display: flex;
+        justify-content: center;
+        gap: 0.5rem;
+        margin-top: 2rem;
+    }
+
+    .page-link {
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        text-decoration: none;
+        color: var(--text-primary-light, #000000);
+        background-color: var(--surface-light, #ffffff);
+        transition: all 0.2s ease;
+    }
+
+    .dark-theme .page-link {
+        color: var(--text-primary-dark, #ffffff);
+        background-color: var(--surface-dark, #1c1c1e);
+    }
+
+    .page-link:hover {
+        background-color: var(--hover-bg-light, #f8f9fa);
+    }
+
+    .dark-theme .page-link:hover {
+        background-color: var(--hover-bg-dark, #2c2c2e);
+    }
+
+    .page-link.active {
+        background-color: var(--primary-light, #007bff);
+        color: white;
+    }
+
+    .dark-theme .page-link.active {
+        background-color: var(--primary-dark, #0A84FF);
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 3rem;
+        color: var(--text-secondary-light, #6c757d);
+    }
+
+    .dark-theme .empty-state {
+        color: var(--text-secondary-dark, #8e8e93);
+    }
+
+    .empty-state i {
+        font-size: 3rem;
+        margin-bottom: 1rem;
+        color: var(--text-secondary-light, #6c757d);
+    }
+
+    .dark-theme .empty-state i {
+        color: var(--text-secondary-dark, #8e8e93);
+    }
+
+    @media (max-width: 768px) {
+        .admin-header {
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .header-actions {
+            width: 100%;
+            flex-wrap: wrap;
+        }
+
+        .btn-action {
+            flex: 1;
+            justify-content: center;
+        }
+
+        .users-table {
+            display: block;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+    }
+</style>
+
+<script>
+    async function toggleUserStatus(userId) {
+        if (!confirm('确定要切换该用户的状态吗？')) return;
+        
+        try {
+            const response = await fetch(`/api/admin/users/${userId}/toggle-status`, {
+                method: 'POST'
+            });
+            const data = await response.json();
+            
+            if (data.success) {
+                location.reload();
+            } else {
+                alert(data.message || '操作失败');
+            }
+        } catch (error) {
+            alert('操作失败：' + error.message);
+        }
+    }
+
+    async function deleteUser(userId) {
+        if (!confirm('确定要删除该用户吗？此操作不可恢复！')) return;
+        
+        try {
+            const response = await fetch(`/api/admin/users/${userId}`, {
+                method: 'DELETE'
+            });
+            const data = await response.json();
+            
+            if (data.success) {
+                location.reload();
+            } else {
+                alert(data.message || '删除失败');
+            }
+        } catch (error) {
+            alert('删除失败：' + error.message);
+        }
+    }
+</script>
+{% endblock %} 

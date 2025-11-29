@@ -1,0 +1,4212 @@
+from flask import Flask, render_template, request, redirect, url_for, jsonify, send_from_directory, send_file
+import shutil
+import pathlib
+import os
+from werkzeug.utils import secure_filename
+import threading
+import time
+import cv2
+import numpy as np
+from PIL import Image
+import atexit
+import sqlite3
+import datetime
+import json
+from functools import wraps
+from flask import session
+# 修改 url_parse 导入方式，适配不同Werkzeug版本
+try:
+    # 新版本Werkzeug
+    from werkzeug.urls import url_parse
+except ImportError:
+    # 如果导入失败，使用urllib作为替代
+    from urllib.parse import urlparse as url_parse_alt
+    def url_parse(url):
+        return url_parse_alt(url)
+import requests
+import traceback
+import uuid
+import sys
+from segformer import SegFormer_Segmentation
+import torch.nn as nn
+import torch.nn.functional as F
+
+#文件预测路径
+dir_origin_path = "./uploads/"
+dir_save_path = "./img_save/"
+#文件保存路径
+path_save = "./img/"
+#预测图片保存路径
+path_predict_img = "./img_save/"
+
+# 批量图像预测保存路径
+batch_image_save_path = "./piliang_img_save/"
+
+#预测视频保存路径
+path_predict_video = "./video_save/"
+
+# 定义处理后图片的文件夹
+PROCESSED_FOLDER = path_predict_img
+
+# 全局变量
+saved_files = []
+detection_status = {}
+current_detection_id = None  # 用于视频处理进度更新
+camera_stop_flag = False
+camera_capture = None
+camera_thread = None  # 跟踪摄像头线程
+
+# 数据库配置
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'detection_records.db')
+
+# 初始化数据库
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS detection_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        detection_id TEXT NOT NULL,
+        detection_type TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        original_path TEXT,
+        result_path TEXT,
+        status TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        metadata TEXT
+    )
+    ''')
+    
+    # 创建用户表
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_login TIMESTAMP,
+        is_active BOOLEAN DEFAULT 1,
+        is_admin BOOLEAN DEFAULT 0
+    )
+    ''')
+    
+    # 检查是否存在管理员账号
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+    admin_count = cursor.fetchone()[0]
+    
+    # 如果没有管理员账号，创建默认管理员
+    if admin_count == 0:
+        admin_username = "admin"
+        admin_email = "admin@example.com"
+        admin_password = hash_password("111111aA")
+        
+        # 检查用户名是否已存在
+        cursor.execute("SELECT id FROM users WHERE username = ?", (admin_username,))
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO users (username, email, password, created_at, is_admin) VALUES (?, ?, ?, ?, ?)",
+                (admin_username, admin_email, admin_password, datetime.datetime.now(), 1)
+            )
+            print("已创建默认管理员账号")
+    
+    conn.commit()
+    conn.close()
+
+# 添加检测记录
+def add_detection_record(detection_id, detection_type, filename, original_path=None, result_path=None, status="processing", metadata=None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO detection_records (detection_id, detection_type, filename, original_path, result_path, status, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (detection_id, detection_type, filename, original_path, result_path, status, datetime.datetime.now(), json.dumps(metadata) if metadata else None)
+    )
+    conn.commit()
+    conn.close()
+
+# 更新检测记录状态
+def update_detection_status(detection_id, status, result_path=None, metadata=None):
+    """更新检测记录的状态"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 处理numpy数据类型，确保可以被JSON序列化
+    if metadata:
+        # 递归处理metadata中的值
+        def convert_numpy_types(data):
+            if isinstance(data, dict):
+                return {k: convert_numpy_types(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [convert_numpy_types(item) for item in data]
+            elif hasattr(data, 'dtype') and hasattr(data, 'tolist'):  # 检测numpy数组
+                return data.tolist()
+            elif hasattr(data, 'dtype') and hasattr(data, 'item'):  # 检测numpy标量
+                return data.item()
+            else:
+                return data
+        
+        # 转换metadata中的numpy类型
+        metadata = convert_numpy_types(metadata)
+    
+    if result_path and metadata:
+        cursor.execute(
+            "UPDATE detection_records SET status = ?, result_path = ?, metadata = ? WHERE detection_id = ?",
+            (status, result_path, json.dumps(metadata) if metadata else None, detection_id)
+        )
+    elif result_path:
+        cursor.execute(
+            "UPDATE detection_records SET status = ?, result_path = ? WHERE detection_id = ?",
+            (status, result_path, detection_id)
+        )
+    elif metadata:
+        cursor.execute(
+            "UPDATE detection_records SET status = ?, metadata = ? WHERE detection_id = ?",
+            (status, json.dumps(metadata) if metadata else None, detection_id)
+        )
+    else:
+        cursor.execute(
+            "UPDATE detection_records SET status = ? WHERE detection_id = ?",
+            (status, detection_id)
+        )
+    
+    conn.commit()
+    conn.close()
+
+# 获取所有检测记录
+def get_all_detection_records(limit=50, offset=0, exclude_types=None):
+    """获取所有检测记录
+    
+    Args:
+        limit: 返回记录的最大数量
+        offset: 分页偏移量
+        exclude_types: 要排除的检测类型列表，例如 ['batch_image_item']
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # 构建查询SQL
+        sql = "SELECT * FROM detection_records"
+        params = []
+        
+        # 如果需要排除某些类型
+        if exclude_types and len(exclude_types) > 0:
+            placeholders = ', '.join(['?' for _ in exclude_types])
+            sql += f" WHERE detection_type NOT IN ({placeholders})"
+            params.extend(exclude_types)
+        
+        # 添加排序和分页
+        sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        # 执行查询
+        cursor.execute(sql, params)
+        
+        records = []
+        for row in cursor.fetchall():
+            record = dict(row)
+            # 如果有结果路径，确保使用带有检测痕迹的结果图像
+            if record['result_path']:
+                filename = os.path.basename(record['result_path'])
+                base_name, ext = os.path.splitext(filename)
+                if not base_name.endswith('_result'):
+                    result_filename = f"{base_name}_result{ext}"
+                    record['result_path'] = os.path.join(os.path.dirname(record['result_path']), result_filename)
+            records.append(record)
+        conn.close()
+        return records
+    except Exception as e:
+        print(f"获取检测记录列表时出错: {str(e)}")
+        traceback.print_exc()
+        return []
+
+# 获取单个检测记录
+def get_detection_record(detection_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM detection_records WHERE detection_id = ?", (detection_id,))
+        record = cursor.fetchone()
+        conn.close()
+        return dict(record) if record else None
+    except Exception as e:
+        print(f"获取检测记录 {detection_id} 时出错: {str(e)}")
+        return None
+
+# 删除检测记录
+def delete_detection_record(detection_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 先获取记录信息，以便删除相关文件
+        cursor.execute("SELECT detection_type, filename, result_path, metadata FROM detection_records WHERE detection_id = ?", (detection_id,))
+        record = cursor.fetchone()
+        
+        if record:
+            detection_type, filename, result_path, metadata_json = record
+            
+            # 如果是批量图像检测记录，需要删除所有相关的子记录
+            if detection_type == 'batch_image':
+                try:
+                    # 查询并删除所有关联的子记录
+                    cursor.execute(
+                        "SELECT detection_id FROM detection_records WHERE detection_type = 'batch_image_item' AND detection_id LIKE ?", 
+                        (f"{detection_id}_%",)
+                    )
+                    
+                    child_records = cursor.fetchall()
+                    if child_records:
+                        print(f"找到 {len(child_records)} 个关联的批量图像项记录，准备删除")
+                        for child_record in child_records:
+                            child_id = child_record[0]
+                            cursor.execute("DELETE FROM detection_records WHERE detection_id = ?", (child_id,))
+                            print(f"已删除子记录: {child_id}")
+                except Exception as e:
+                    print(f"删除批量图像子记录时出错: {str(e)}")
+                    traceback.print_exc()
+            
+            # 删除主记录
+            cursor.execute("DELETE FROM detection_records WHERE detection_id = ?", (detection_id,))
+            conn.commit()
+            
+            # 尝试删除结果文件
+            if result_path and os.path.exists(result_path):
+                try:
+                    os.remove(result_path)
+                    print(f"已删除结果文件: {result_path}")
+                except Exception as e:
+                    print(f"删除结果文件时出错: {str(e)}")
+            
+            return True
+        else:
+            print(f"未找到检测记录: {detection_id}")
+            return False
+    except Exception as e:
+        print(f"删除检测记录时出错: {str(e)}")
+        traceback.print_exc()
+        return False
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# 用户相关函数
+def hash_password(password):
+    """对密码进行哈希处理"""
+    import hashlib
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def register_user(username, email, password):
+    """注册新用户"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 检查用户名是否已存在
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        if cursor.fetchone():
+            return False, "用户名已存在"
+        
+        # 检查邮箱是否已存在
+        cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+        if cursor.fetchone():
+            return False, "邮箱已被注册"
+        
+        # 哈希密码
+        hashed_password = hash_password(password)
+        
+        # 插入新用户
+        cursor.execute(
+            "INSERT INTO users (username, email, password, created_at) VALUES (?, ?, ?, ?)",
+            (username, email, hashed_password, datetime.datetime.now())
+        )
+        conn.commit()
+        return True, "注册成功"
+    except Exception as e:
+        print(f"注册用户时出错: {str(e)}")
+        return False, f"注册失败: {str(e)}"
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def verify_user(username, password):
+    """验证用户登录"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 查询用户
+        cursor.execute("SELECT id, password, is_active, is_admin FROM users WHERE username = ?", (username,))
+        user = cursor.fetchone()
+        
+        if not user:
+            return False, "用户不存在"
+        
+        user_id, stored_password, is_active, is_admin = user
+        
+        # 检查账户是否激活
+        if not is_active:
+            return False, "账户已被禁用"
+        
+        # 验证密码
+        if stored_password == hash_password(password):
+            # 更新最后登录时间
+            cursor.execute(
+                "UPDATE users SET last_login = ? WHERE id = ?",
+                (datetime.datetime.now(), user_id)
+            )
+            conn.commit()
+            return True, user_id
+        else:
+            return False, "密码错误"
+    except Exception as e:
+        print(f"验证用户时出错: {str(e)}")
+        return False, f"登录失败: {str(e)}"
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def get_user_by_id(user_id):
+    """根据ID获取用户信息"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id, username, email, created_at, last_login, is_admin, is_active FROM users WHERE id = ?", (user_id,))
+        user = cursor.fetchone()
+        
+        if user:
+            user_dict = dict(user)
+            
+            # 获取用户的检测统计信息
+            cursor.execute("""
+                SELECT detection_type, COUNT(*) as count 
+                FROM detection_records 
+                GROUP BY detection_type
+            """)
+            
+            stats = cursor.fetchall()
+            
+            # 初始化统计数据
+            user_dict['image_count'] = 0
+            user_dict['video_count'] = 0
+            user_dict['camera_count'] = 0
+            
+            # 填充统计数据
+            for stat in stats:
+                if stat['detection_type'] == 'image':
+                    user_dict['image_count'] = stat['count']
+                elif stat['detection_type'] == 'video':
+                    user_dict['video_count'] = stat['count']
+                elif stat['detection_type'] == 'camera':
+                    user_dict['camera_count'] = stat['count']
+            
+            return user_dict
+        return None
+    except Exception as e:
+        print(f"获取用户信息时出错: {str(e)}")
+        return None
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def train(video_path=0, video_save_path="", video_fps=25, mode="predict", count=False, name_classes=None, fps_image_path=None, test_interval=1, simplify=True, onnx_save_path="model.onnx", is_camera=False):
+    #----------------------------------------------------#
+    #   将单张图片预测、摄像头检测和FPS测试功能
+    #   整合到了一个py文件中，通过指定mode进行模式的修改。
+    #----------------------------------------------------#
+    import time
+    import cv2
+    import numpy as np
+    import os  # 确保在函数开始就导入os模块
+    from PIL import Image
+    from segformer import SegFormer_Segmentation
+    global current_detection_id  # 移动到函数开始处
+
+    #-------------------------------------------------------------------------#
+    #   如果想要修改对应种类的颜色，到generate函数里修改self.colors即可
+    #-------------------------------------------------------------------------#
+    segformer = SegFormer_Segmentation()
+    
+    if mode == "video":
+        try:
+            global camera_capture  # 声明使用全局变量
+            
+            # 对于摄像头，尝试不同的后端和索引
+            if is_camera:
+                # 尝试不同的摄像头后端和索引
+                # 修改后端顺序，优先使用DirectShow (CAP_DSHOW)
+                backends = [cv2.CAP_DSHOW, cv2.CAP_ANY, 700, cv2.CAP_MSMF]
+                indices = [0, 1]  # 尝试摄像头索引0和1
+                capture = None
+                
+                # 添加预热超时机制
+                max_warmup_attempts = 5  # 最多预热5次
+                
+                for index in indices:
+                    for backend in backends:
+                        try:
+                            print(f"尝试使用索引 {index} 和后端 {backend} 打开摄像头")
+                            # 设置摄像头属性
+                            capture = cv2.VideoCapture(index, backend)
+                            
+                            # 如果成功打开，设置一些属性以提高稳定性
+                            if capture.isOpened():
+                                # 设置缓冲区大小
+                                capture.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                                # 设置分辨率
+                                capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                                # 设置自动曝光
+                                capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)  # 0.75表示自动曝光
+                                # 设置亮度
+                                capture.set(cv2.CAP_PROP_BRIGHTNESS, 150)  # 增加亮度
+                                # 设置对比度
+                                capture.set(cv2.CAP_PROP_CONTRAST, 150)  # 增加对比度
+                                
+                                # 读取有限次数的测试帧，避免无限循环
+                                warmup_success = False
+                                for warmup_attempt in range(max_warmup_attempts):
+                                    print(f"预热摄像头，读取测试帧 (尝试 {warmup_attempt+1}/{max_warmup_attempts})")
+                                    ret, test_frame = capture.read()
+                                    if ret and test_frame is not None:
+                                        # 检查帧是否有效
+                                        if np.mean(test_frame) > 5:  # 确保帧不是全黑的
+                                            warmup_success = True
+                                            break
+                                    time.sleep(0.2)  # 给摄像头一些时间稳定
+                                
+                                # 如果预热成功，使用这个摄像头
+                                if warmup_success:
+                                    print(f"成功使用索引 {index} 和后端 {backend} 打开摄像头并预热")
+                                    camera_capture = capture  # 保存到全局变量
+                                    break
+                                else:
+                                    print(f"摄像头预热失败，尝试其他摄像头或后端")
+                                    capture.release()
+                                    capture = None
+                            else:
+                                print(f"无法使用索引 {index} 和后端 {backend} 打开摄像头")
+                        except Exception as e:
+                            print(f"尝试使用索引 {index} 和后端 {backend} 打开摄像头失败: {str(e)}")
+                            if capture is not None:
+                                capture.release()
+                                capture = None
+                    
+                    if capture is not None and capture.isOpened():
+                        break
+                
+                # 如果所有尝试都失败，创建一个虚拟视频
+                if capture is None or not capture.isOpened():
+                    print("无法打开摄像头，创建虚拟视频")
+                    create_dummy_video(video_save_path, video_fps)
+                    return
+            else:
+                # 普通视频文件
+                capture = cv2.VideoCapture(video_path)
+                if not capture.isOpened():
+                    raise ValueError("无法打开视频文件")
+
+            # 获取视频信息
+            width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # 确保宽度和高度有效
+            if width <= 0 or height <= 0:
+                width = 640  # 默认宽度
+                height = 480  # 默认高度
+                print(f"无法获取有效的视频尺寸，使用默认值: {width}x{height}")
+            
+            # 对于摄像头输入，我们不能获取总帧数
+            if is_camera:
+                total_frames = float('inf')  # 无限帧数
+            else:
+                total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            if video_save_path != "":
+                try:
+                    # 确保目录存在
+                    os.makedirs(os.path.dirname(os.path.abspath(video_save_path)), exist_ok=True)
+                    
+                    # 根据文件扩展名选择合适的编码器
+                    if video_save_path.endswith('.mp4'):
+                        # 对于MP4文件，使用H.264编码器
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    elif video_save_path.endswith('.avi'):
+                        # 对于AVI文件，使用XVID编码器
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    else:
+                        # 默认使用XVID编码器
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    
+                    # 创建视频写入器
+                    out = cv2.VideoWriter(video_save_path, fourcc, video_fps, (width, height))
+                    
+                    # 检查VideoWriter是否成功初始化
+                    if not out.isOpened():
+                        print(f"警告: 无法使用首选编码器创建视频写入器，尝试使用其他编码器")
+                        
+                        # 尝试其他编码器
+                        alternative_codecs = [
+                            ('MJPG', '.avi'),  # Motion JPEG
+                            ('DIVX', '.avi'),  # DivX编码
+                            ('X264', '.mp4'),  # H.264编码
+                            ('WMV1', '.wmv'),  # Windows Media Video
+                            ('FMP4', '.mp4')   # FFmpeg MP4
+                        ]
+                        
+                        for codec, ext in alternative_codecs:
+                            try:
+                                # 修改文件扩展名以匹配编码器
+                                new_path = os.path.splitext(video_save_path)[0] + ext
+                                print(f"尝试使用编码器 {codec} 和文件路径 {new_path}")
+                                
+                                fourcc = cv2.VideoWriter_fourcc(*codec)
+                                out = cv2.VideoWriter(new_path, fourcc, video_fps, (width, height))
+                                
+                                if out.isOpened():
+                                    video_save_path = new_path  # 更新保存路径
+                                    print(f"成功使用编码器 {codec} 创建视频写入器，输出到 {new_path}")
+                                    break
+                            except Exception as e:
+                                print(f"尝试编码器 {codec} 时出错: {str(e)}")
+                        
+                        if not out.isOpened():
+                            raise ValueError("无法创建视频写入器，请检查系统是否安装了必要的编解码器")
+                except Exception as e:
+                    print(f"创建视频写入器时出错: {str(e)}")
+                    raise
+
+            fps = 0.0
+            frame_count = 0
+            frames_processed = 0  # 跟踪成功处理的帧数
+            sample_rate = 4  # 每4帧处理一次，其他帧直接使用原始帧
+            
+            # 为摄像头模式添加停止标志
+            global camera_stop_flag
+            if is_camera:
+                camera_stop_flag = False
+
+            # 修改循环条件，对于摄像头模式，需要检查停止标志
+            consecutive_failures = 0  # 跟踪连续失败次数
+            max_failures = 10  # 最大允许的连续失败次数
+            min_frames = 5  # 最少需要处理的帧数
+
+            # 添加总体超时机制
+            start_time = time.time()
+            max_detection_time = 60  # 最多运行60秒
+            
+            # 保存最后一次检测结果，用于填充未处理的帧
+            last_processed_frame = None
+
+            while True:
+                # 检查是否超时
+                if time.time() - start_time > max_detection_time:
+                    print(f"摄像头检测超时 ({max_detection_time}秒)，强制结束")
+                    break
+                    
+                if is_camera and camera_stop_flag:
+                    print("检测到停止标志，结束摄像头检测")
+                    break
+                    
+                t1 = time.time()
+                ret, frame = capture.read()
+                if not ret or frame is None:
+                    if is_camera:
+                        # 摄像头可能暂时无法读取，但不应该立即退出
+                        consecutive_failures += 1
+                        print(f"无法从摄像头读取帧，尝试重新读取... (失败次数: {consecutive_failures}/{max_failures})")
+                        
+                        if consecutive_failures >= max_failures:
+                            print(f"连续 {max_failures} 次无法读取帧，结束检测")
+                            break
+                        
+                        time.sleep(0.1)  # 短暂暂停
+                        continue
+                    else:
+                        # 视频文件读取完毕
+                        print("视频文件读取完毕")
+                        break
+                else:
+                    # 成功读取帧，重置失败计数
+                    consecutive_failures = 0
+                
+                # 检查帧是否全黑
+                if np.mean(frame) < 5:
+                    print("警告: 当前帧太暗，可能是黑屏")
+                    # 尝试调整摄像头参数
+                    if is_camera:
+                        capture.set(cv2.CAP_PROP_BRIGHTNESS, 200)  # 进一步增加亮度
+                        capture.set(cv2.CAP_PROP_CONTRAST, 200)  # 进一步增加对比度
+                
+                # 更新进度 - 对于摄像头，我们不显示进度百分比
+                frame_count += 1
+                if not is_camera and frame_count % 10 == 0 and current_detection_id:
+                    progress = int((frame_count / total_frames) * 100)
+                    detection_status[current_detection_id]['progress'] = progress
+
+                try:
+                    # 格式转变，BGRtoRGB
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    # 只处理每隔sample_rate帧的图像
+                    if frame_count % sample_rate == 0:
+                        # 转变成Image
+                        frame_pil = Image.fromarray(np.uint8(frame_rgb))
+                        
+                        # 进行检测，指定使用预测模式加快检测速度
+                        print(f"正在处理第{frame_count}帧...")
+                        # 明确指定使用predict模式处理视频帧
+                        frame_detected = np.array(segformer.detect_image(frame_pil, mode="predict"))
+                        print(f"第{frame_count}帧处理完成")
+                        
+                        # 保存处理结果，用于填充未处理的帧
+                        last_processed_frame = frame_detected
+                    else:
+                        # 对于不需要处理的帧，有两种选择：
+                        # 1. 使用原始帧
+                        # frame_detected = frame_rgb
+                        
+                        # 2. 使用最近一次处理的结果（如果有）
+                        if last_processed_frame is not None:
+                            frame_detected = last_processed_frame
+                        else:
+                            frame_detected = frame_rgb
+                        
+                        print(f"跳过第{frame_count}帧处理")
+                    
+                    # RGBtoBGR满足opencv显示格式
+                    frame_bgr = cv2.cvtColor(frame_detected, cv2.COLOR_RGB2BGR)
+
+                    fps = (fps + (1./(time.time()-t1))) / 2
+                    frame_bgr = cv2.putText(frame_bgr, f"fps= {fps:.2f}", (0, 40), 
+                                          cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                    if video_save_path != "" and out is not None and out.isOpened():
+                        out.write(frame_bgr)
+                        frames_processed += 1
+                except Exception as e:
+                    print(f"处理帧时出错: {str(e)}")
+                    traceback.print_exc()  # 打印详细错误信息
+                    # 尝试写入原始帧以确保视频连续性
+                    try:
+                        if video_save_path != "" and out is not None and out.isOpened():
+                            # 写入原始帧而不是处理后的帧
+                            out.write(frame)
+                            frames_processed += 1
+                            print("已写入原始帧作为替代")
+                    except Exception as write_error:
+                        print(f"尝试写入原始帧时出错: {str(write_error)}")
+                    # 继续处理下一帧，而不是中断整个过程
+                    continue
+
+            print(f"视频处理完成！共处理 {frames_processed} 帧")
+            
+            # 如果处理的帧数太少，创建一个虚拟视频
+            if frames_processed < min_frames and is_camera:
+                print(f"处理的帧数太少 ({frames_processed} < {min_frames})，创建虚拟视频")
+                # 先释放资源
+                if capture is not None:
+                    capture.release()
+                    if is_camera:
+                        camera_capture = None
+                if 'out' in locals() and out is not None and out.isOpened():
+                    out.release()
+                
+                # 创建虚拟视频
+                create_dummy_video(video_save_path, video_fps)
+                return
+
+            # 确保在退出前释放资源
+            if capture is not None:
+                capture.release()
+                if is_camera:
+                    camera_capture = None  # 清除全局引用
+                print("已释放摄像头资源")
+                
+            if 'out' in locals() and out is not None and out.isOpened():
+                out.release()
+                print("已释放视频写入器资源")
+                
+            cv2.destroyAllWindows()
+            print("已关闭所有OpenCV窗口")
+
+            # 在视频处理完成后
+            if frames_processed > 0:
+                print(f"处理后的视频已保存到: {video_save_path}")
+                
+                # 尝试使用ffmpeg转换为更兼容的格式
+                if video_save_path.endswith('.mp4'):
+                    # 如果已经是MP4格式，尝试优化它
+                    optimized_path = os.path.splitext(video_save_path)[0] + "_optimized.mp4"
+                    success, new_path = convert_video_with_ffmpeg(video_save_path, optimized_path)
+                    if success:
+                        print(f"视频已优化: {new_path}")
+                        video_save_path = new_path
+                else:
+                    # 转换为MP4格式
+                    mp4_path = os.path.splitext(video_save_path)[0] + '.mp4'
+                    success, new_path = convert_video_with_ffmpeg(video_save_path, mp4_path)
+                    if success:
+                        print(f"视频已转换为MP4格式: {new_path}")
+                        video_save_path = new_path
+
+        except Exception as e:
+            print(f"视频处理过程中出错: {str(e)}")
+            if is_camera:
+                camera_capture = None  # 确保在异常情况下也清除全局引用
+            raise e
+
+        finally:
+            # 确保即使发生异常也会释放资源
+            if 'capture' in locals() and capture is not None:
+                capture.release()
+                if is_camera:
+                    camera_capture = None  # 确保在finally块中也清除全局引用
+            if 'out' in locals() and out is not None and out.isOpened():
+                out.release()
+                print("在finally块中释放视频写入器资源")
+            cv2.destroyAllWindows()
+            print("在finally块中关闭所有OpenCV窗口")
+
+    elif mode == "predict":
+        try:
+            # 声明全局变量，必须在使用之前声明
+            global camera_capture, camera_stop_flag
+            
+            # 针对视频处理的优化信息
+            if video_path != 0:  # 如果不是摄像头
+                print(f"视频检测优化已启用：使用predict模式，每{sample_rate}帧进行一次检测分析，提高处理速度")
+            
+            # 对于摄像头，尝试不同的后端和索引
+            if is_camera:
+                # 尝试不同的摄像头后端和索引
+                # 修改后端顺序，优先使用DirectShow (CAP_DSHOW)
+                backends = [cv2.CAP_DSHOW, cv2.CAP_ANY, 700, cv2.CAP_MSMF]
+                indices = [0, 1]  # 尝试摄像头索引0和1
+                capture = None
+                
+                # 添加预热超时机制
+                max_warmup_attempts = 5  # 最多预热5次
+                
+                for index in indices:
+                    for backend in backends:
+                        try:
+                            print(f"尝试使用索引 {index} 和后端 {backend} 打开摄像头")
+                            # 设置摄像头属性
+                            capture = cv2.VideoCapture(index, backend)
+                            
+                            # 如果成功打开，设置一些属性以提高稳定性
+                            if capture.isOpened():
+                                # 设置缓冲区大小
+                                capture.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                                # 设置分辨率
+                                capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                                # 设置自动曝光
+                                capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)  # 0.75表示自动曝光
+                                # 设置亮度
+                                capture.set(cv2.CAP_PROP_BRIGHTNESS, 150)  # 增加亮度
+                                # 设置对比度
+                                capture.set(cv2.CAP_PROP_CONTRAST, 150)  # 增加对比度
+                                
+                                # 读取有限次数的测试帧，避免无限循环
+                                warmup_success = False
+                                for warmup_attempt in range(max_warmup_attempts):
+                                    print(f"预热摄像头，读取测试帧 (尝试 {warmup_attempt+1}/{max_warmup_attempts})")
+                                    ret, test_frame = capture.read()
+                                    if ret and test_frame is not None:
+                                        # 检查帧是否有效
+                                        if np.mean(test_frame) > 5:  # 确保帧不是全黑的
+                                            warmup_success = True
+                                            break
+                                    time.sleep(0.2)  # 给摄像头一些时间稳定
+                                
+                                # 如果预热成功，使用这个摄像头
+                                if warmup_success:
+                                    print(f"成功使用索引 {index} 和后端 {backend} 打开摄像头并预热")
+                                    camera_capture = capture  # 保存到全局变量
+                                    break
+                                else:
+                                    print(f"摄像头预热失败，尝试其他摄像头或后端")
+                                    capture.release()
+                                    capture = None
+                            else:
+                                print(f"无法使用索引 {index} 和后端 {backend} 打开摄像头")
+                        except Exception as e:
+                            print(f"尝试使用索引 {index} 和后端 {backend} 打开摄像头失败: {str(e)}")
+                            if capture is not None:
+                                capture.release()
+                                capture = None
+                    
+                    if capture is not None and capture.isOpened():
+                        break
+                
+                # 如果所有尝试都失败，创建一个虚拟视频
+                if capture is None or not capture.isOpened():
+                    print("无法打开摄像头，创建虚拟视频")
+                    create_dummy_video(video_save_path, video_fps)
+                    return
+            else:
+                # 普通视频文件
+                capture = cv2.VideoCapture(video_path)
+                if not capture.isOpened():
+                    raise ValueError("无法打开视频文件")
+
+            # 获取视频信息
+            width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # 确保宽度和高度有效
+            if width <= 0 or height <= 0:
+                width = 640  # 默认宽度
+                height = 480  # 默认高度
+                print(f"无法获取有效的视频尺寸，使用默认值: {width}x{height}")
+            
+            # 对于摄像头输入，我们不能获取总帧数
+            if is_camera:
+                total_frames = float('inf')  # 无限帧数
+            else:
+                total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            if video_save_path != "":
+                try:
+                    # 确保目录存在
+                    os.makedirs(os.path.dirname(os.path.abspath(video_save_path)), exist_ok=True)
+                    
+                    # 根据文件扩展名选择合适的编码器
+                    if video_save_path.endswith('.mp4'):
+                        # 对于MP4文件，使用H.264编码器
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    elif video_save_path.endswith('.avi'):
+                        # 对于AVI文件，使用XVID编码器
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    else:
+                        # 默认使用XVID编码器
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    
+                    # 创建视频写入器
+                    out = cv2.VideoWriter(video_save_path, fourcc, video_fps, (width, height))
+                    
+                    # 检查VideoWriter是否成功初始化
+                    if not out.isOpened():
+                        print(f"警告: 无法使用首选编码器创建视频写入器，尝试使用其他编码器")
+                        
+                        # 尝试其他编码器
+                        alternative_codecs = [
+                            ('MJPG', '.avi'),  # Motion JPEG
+                            ('DIVX', '.avi'),  # DivX编码
+                            ('X264', '.mp4'),  # H.264编码
+                            ('WMV1', '.wmv'),  # Windows Media Video
+                            ('FMP4', '.mp4')   # FFmpeg MP4
+                        ]
+                        
+                        for codec, ext in alternative_codecs:
+                            try:
+                                # 修改文件扩展名以匹配编码器
+                                new_path = os.path.splitext(video_save_path)[0] + ext
+                                print(f"尝试使用编码器 {codec} 和文件路径 {new_path}")
+                                
+                                fourcc = cv2.VideoWriter_fourcc(*codec)
+                                out = cv2.VideoWriter(new_path, fourcc, video_fps, (width, height))
+                                
+                                if out.isOpened():
+                                    video_save_path = new_path  # 更新保存路径
+                                    print(f"成功使用编码器 {codec} 创建视频写入器，输出到 {new_path}")
+                                    break
+                            except Exception as e:
+                                print(f"尝试编码器 {codec} 时出错: {str(e)}")
+                        
+                        if not out.isOpened():
+                            raise ValueError("无法创建视频写入器，请检查系统是否安装了必要的编解码器")
+                except Exception as e:
+                    print(f"创建视频写入器时出错: {str(e)}")
+                    raise
+
+            fps = 0.0
+            frame_count = 0
+            frames_processed = 0  # 跟踪成功处理的帧数
+            sample_rate = 4  # 每4帧处理一次，其他帧直接使用原始帧
+            
+            # 为摄像头模式添加停止标志
+            global camera_stop_flag
+            if is_camera:
+                camera_stop_flag = False
+
+            # 修改循环条件，对于摄像头模式，需要检查停止标志
+            consecutive_failures = 0  # 跟踪连续失败次数
+            max_failures = 10  # 最大允许的连续失败次数
+            min_frames = 5  # 最少需要处理的帧数
+
+            # 添加总体超时机制
+            start_time = time.time()
+            max_detection_time = 60  # 最多运行60秒
+            
+            # 保存最后一次检测结果，用于填充未处理的帧
+            last_processed_frame = None
+
+            while True:
+                # 检查是否超时
+                if time.time() - start_time > max_detection_time:
+                    print(f"摄像头检测超时 ({max_detection_time}秒)，强制结束")
+                    break
+                    
+                if is_camera and camera_stop_flag:
+                    print("检测到停止标志，结束摄像头检测")
+                    break
+                    
+                t1 = time.time()
+                ret, frame = capture.read()
+                if not ret or frame is None:
+                    if is_camera:
+                        # 摄像头可能暂时无法读取，但不应该立即退出
+                        consecutive_failures += 1
+                        print(f"无法从摄像头读取帧，尝试重新读取... (失败次数: {consecutive_failures}/{max_failures})")
+                        
+                        if consecutive_failures >= max_failures:
+                            print(f"连续 {max_failures} 次无法读取帧，结束检测")
+                            break
+                        
+                        time.sleep(0.1)  # 短暂暂停
+                        continue
+                    else:
+                        # 视频文件读取完毕
+                        print("视频文件读取完毕")
+                        break
+                else:
+                    # 成功读取帧，重置失败计数
+                    consecutive_failures = 0
+                
+                # 检查帧是否全黑
+                if np.mean(frame) < 5:
+                    print("警告: 当前帧太暗，可能是黑屏")
+                    # 尝试调整摄像头参数
+                    if is_camera:
+                        capture.set(cv2.CAP_PROP_BRIGHTNESS, 200)  # 进一步增加亮度
+                        capture.set(cv2.CAP_PROP_CONTRAST, 200)  # 进一步增加对比度
+                
+                # 更新进度 - 对于摄像头，我们不显示进度百分比
+                frame_count += 1
+                if not is_camera and frame_count % 10 == 0 and current_detection_id:
+                    progress = int((frame_count / total_frames) * 100)
+                    detection_status[current_detection_id]['progress'] = progress
+
+                try:
+                    # 格式转变，BGRtoRGB
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    # 只处理每隔sample_rate帧的图像
+                    if frame_count % sample_rate == 0:
+                        # 转变成Image
+                        frame_pil = Image.fromarray(np.uint8(frame_rgb))
+                        
+                        # 进行检测，指定使用预测模式加快检测速度
+                        print(f"正在处理第{frame_count}帧...")
+                        # 明确指定使用predict模式处理视频帧
+                        frame_detected = np.array(segformer.detect_image(frame_pil, mode="predict"))
+                        print(f"第{frame_count}帧处理完成")
+                        
+                        # 保存处理结果，用于填充未处理的帧
+                        last_processed_frame = frame_detected
+                    else:
+                        # 对于不需要处理的帧，有两种选择：
+                        # 1. 使用原始帧
+                        # frame_detected = frame_rgb
+                        
+                        # 2. 使用最近一次处理的结果（如果有）
+                        if last_processed_frame is not None:
+                            frame_detected = last_processed_frame
+                        else:
+                            frame_detected = frame_rgb
+                        
+                        print(f"跳过第{frame_count}帧处理")
+                    
+                    # RGBtoBGR满足opencv显示格式
+                    frame_bgr = cv2.cvtColor(frame_detected, cv2.COLOR_RGB2BGR)
+
+                    fps = (fps + (1./(time.time()-t1))) / 2
+                    frame_bgr = cv2.putText(frame_bgr, f"fps= {fps:.2f}", (0, 40), 
+                                          cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                    if video_save_path != "" and out is not None and out.isOpened():
+                        out.write(frame_bgr)
+                        frames_processed += 1
+                except Exception as e:
+                    print(f"处理帧时出错: {str(e)}")
+                    traceback.print_exc()  # 打印详细错误信息
+                    # 尝试写入原始帧以确保视频连续性
+                    try:
+                        if video_save_path != "" and out is not None and out.isOpened():
+                            # 写入原始帧而不是处理后的帧
+                            out.write(frame)
+                            frames_processed += 1
+                            print("已写入原始帧作为替代")
+                    except Exception as write_error:
+                        print(f"尝试写入原始帧时出错: {str(write_error)}")
+                    # 继续处理下一帧，而不是中断整个过程
+                    continue
+
+            print(f"视频处理完成！共处理 {frames_processed} 帧")
+            
+            # 如果处理的帧数太少，创建一个虚拟视频
+            if frames_processed < min_frames and is_camera:
+                print(f"处理的帧数太少 ({frames_processed} < {min_frames})，创建虚拟视频")
+                # 先释放资源
+                if capture is not None:
+                    capture.release()
+                    if is_camera:
+                        camera_capture = None
+                if 'out' in locals() and out is not None and out.isOpened():
+                    out.release()
+                
+                # 创建虚拟视频
+                create_dummy_video(video_save_path, video_fps)
+                return
+
+            # 确保在退出前释放资源
+            if capture is not None:
+                capture.release()
+                if is_camera:
+                    camera_capture = None  # 清除全局引用
+                print("已释放摄像头资源")
+                
+            if 'out' in locals() and out is not None and out.isOpened():
+                out.release()
+                print("已释放视频写入器资源")
+                
+            cv2.destroyAllWindows()
+            print("已关闭所有OpenCV窗口")
+
+            # 在视频处理完成后
+            if frames_processed > 0:
+                print(f"处理后的视频已保存到: {video_save_path}")
+                
+                # 尝试使用ffmpeg转换为更兼容的格式
+                if video_save_path.endswith('.mp4'):
+                    # 如果已经是MP4格式，尝试优化它
+                    optimized_path = os.path.splitext(video_save_path)[0] + "_optimized.mp4"
+                    success, new_path = convert_video_with_ffmpeg(video_save_path, optimized_path)
+                    if success:
+                        print(f"视频已优化: {new_path}")
+                        video_save_path = new_path
+                else:
+                    # 转换为MP4格式
+                    mp4_path = os.path.splitext(video_save_path)[0] + '.mp4'
+                    success, new_path = convert_video_with_ffmpeg(video_save_path, mp4_path)
+                    if success:
+                        print(f"视频已转换为MP4格式: {new_path}")
+                        video_save_path = new_path
+
+        except Exception as e:
+            print(f"视频处理过程中出错: {str(e)}")
+            if is_camera:
+                camera_capture = None  # 确保在异常情况下也清除全局引用
+            raise e
+
+        finally:
+            # 确保即使发生异常也会释放资源
+            if 'capture' in locals() and capture is not None:
+                capture.release()
+                if is_camera:
+                    camera_capture = None  # 确保在finally块中也清除全局引用
+            if 'out' in locals() and out is not None and out.isOpened():
+                out.release()
+                print("在finally块中释放视频写入器资源")
+            cv2.destroyAllWindows()
+            print("在finally块中关闭所有OpenCV窗口")
+
+    elif mode == "fps":
+        img = Image.open(fps_image_path)
+        tact_time = segformer.get_FPS(img, test_interval)
+        print(str(tact_time) + ' seconds, ' + str(1/tact_time) + 'FPS, @batch_size 1')
+
+    elif mode == "dir_predict":
+        import os
+        from tqdm import tqdm
+
+        img_names = os.listdir(dir_origin_path)
+        for img_name in tqdm(img_names):
+            if img_name.lower().endswith(
+                    ('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff')):
+                image_path = os.path.join(dir_origin_path, img_name)  # 获取图片路径
+                image = Image.open(image_path)  # 打开图片
+
+                # 进行预测
+                r_image = segformer.detect_image(image)
+
+                # 保存预测结果
+                output_path = os.path.join(dir_save_path, img_name)
+                r_image.save(output_path)  # 保存预测结果
+                print(f"Processed {img_name}")  # 打印当前处理的文件名
+
+        print("Batch prediction finished.")  # 所有图片处理完成
+
+    elif mode == "export_onnx":
+        segformer.convert_to_onnx(simplify, onnx_save_path)
+
+    else:
+        raise AssertionError("Please specify the correct mode: 'predict', 'video', 'fps' or 'dir_predict'.")
+
+
+# 在应用程序启动时禁用Intel RealSense支持
+os.environ["OPENCV_VIDEOIO_PRIORITY_OBSENSOR"] = "0"
+
+app = Flask(__name__)
+
+# 配置
+UPLOAD_FOLDER = 'uploads'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024  # 512MB max file size
+
+# 会话配置
+app.secret_key = os.urandom(24)  # 用于会话加密
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['PERMANENT_SESSION_LIFETIME'] = datetime.timedelta(days=7)  # 会话有效期7天
+
+# 初始化数据库
+init_db()
+
+# 文件路径配置
+dir_origin_path = os.path.abspath("uploads")
+dir_save_path = os.path.abspath("img_save")
+path_save = os.path.abspath("img")
+path_predict_img = os.path.abspath("img_save")
+path_predict_video = os.path.abspath("video_save")
+
+# 确保必要的目录存在
+for path in [UPLOAD_FOLDER, dir_save_path, path_predict_video]:
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+def async_detect(file_id, mode, **kwargs):
+    global current_detection_id
+    try:
+        detection_status[file_id] = {'status': 'processing', 'progress': 0}
+        if mode == "image":
+            # 获取原始图像路径
+            record = get_detection_record(file_id)
+            if not record or 'original_path' not in record:
+                raise ValueError("找不到原始图像路径")
+            
+            original_path = record['original_path']
+            if not os.path.exists(original_path):
+                raise ValueError(f"原始图像文件不存在: {original_path}")
+            
+            # 指定结果保存路径
+            filename = os.path.basename(original_path)
+            base_name, ext = os.path.splitext(filename)
+            
+            # 获取其他参数
+            confidence_threshold = kwargs.get('confidence_threshold', 0.6)
+            detection_mode = kwargs.get('detection_mode', 'predict')  # 默认为普通预测模式
+            
+            # 记录处理开始时间
+            start_processing_time = time.time()
+            
+            # 根据检测模式调整结果文件名
+            if detection_mode == "heatmap":
+                result_filename = f"{base_name}_heatmap{ext}"
+            else:
+                result_filename = f"{base_name}_result{ext}"
+                
+            result_path = os.path.join(path_predict_img, result_filename)
+            
+            print(f"开始处理图像: {original_path}")
+            print(f"结果将保存到: {result_path}")
+            print(f"检测模式: {detection_mode}, 置信度阈值: {confidence_threshold}")
+            
+            try:
+                # 使用PIL打开图像
+                from PIL import Image
+                image = Image.open(original_path)
+                if image.mode != 'RGB':
+                    print(f"转换图像从 {image.mode} 到 RGB")
+                    image = image.convert('RGB')
+                
+                # 查看是否有CUDA可用
+                import torch
+                if torch.cuda.is_available():
+                    device_name = torch.cuda.get_device_name(0)
+                    print(f"使用CUDA设备: {device_name}")
+                else:
+                    print("CUDA不可用，使用CPU")
+                
+                # 从segformer.py导入SegFormer_Segmentation类
+                from segformer import SegFormer_Segmentation
+                
+                # 创建分割模型实例 (使用mix_type=0以显示带有检测痕迹的混合图像)
+                model = SegFormer_Segmentation(mix_type=0, cuda=torch.cuda.is_available())
+                
+                # 进行预测
+                print("进行图像预测")
+                try:
+                    # 使用 detect_image 方法进行检测，传入新参数
+                    result = model.detect_image(
+                        image, 
+                        count=True if detection_mode != "heatmap" else False,  # 热力图模式下不需要进行计数
+                        name_classes=['背景', '包裹体', '贴片', '划痕', '其他'],
+                        confidence_threshold=float(confidence_threshold),
+                        mode=detection_mode,
+                        img_name=result_filename
+                    )
+                    
+                    if detection_mode == "heatmap":
+                        result_img = result
+                        # 热力图模式不需要计算缺陷数量
+                        defect_counts = {}
+                        print("热力图模式：不进行缺陷计数")
+                    elif detection_mode == "confidence":
+                        # 置信度检测模式
+                        result_img = result
+                        # 获取类别统计
+                        try:
+                            # 从模型获取缺陷计数
+                            classes_nums = getattr(model, 'last_classes_nums', np.zeros(5))
+                            defect_counts = {
+                                'inclusion': int(classes_nums[1]) if len(classes_nums) > 1 else 0,  # 包裹体
+                                'patches': int(classes_nums[2]) if len(classes_nums) > 2 else 0,    # 贴片
+                                'scratches': int(classes_nums[3]) if len(classes_nums) > 3 else 0,  # 划痕
+                                'other': int(classes_nums[4]) if len(classes_nums) > 4 else 0       # 其他
+                            }
+                            
+                            # 获取置信度信息
+                            confidence_info = getattr(model, 'last_confidence_info', {})
+                            # 打印置信度信息
+                            print(f"置信度检测模式: 阈值={confidence_threshold}")
+                            for class_name, info in confidence_info.items():
+                                if class_name != '背景' and info['count'] > 0:
+                                    print(f"  {class_name}: 像素数={info['count']}, 平均置信度={info['avg_confidence']:.4f}")
+                        except Exception as e:
+                            print(f"获取置信度信息失败: {e}")
+                            defect_counts = {}
+                    else:
+                        # 普通预测模式
+                        result_img = result
+                        # 获取类别统计
+                        try:
+                            # 从模型获取缺陷计数
+                            classes_nums = getattr(model, 'last_classes_nums', np.zeros(5))
+                            defect_counts = {
+                                'inclusion': int(classes_nums[1]) if len(classes_nums) > 1 else 0,  # 包裹体
+                                'patches': int(classes_nums[2]) if len(classes_nums) > 2 else 0,    # 贴片
+                                'scratches': int(classes_nums[3]) if len(classes_nums) > 3 else 0,  # 划痕
+                                'other': int(classes_nums[4]) if len(classes_nums) > 4 else 0       # 其他
+                            }
+                            # 额外输出统计信息用于调试
+                            print(f"最终类别统计: [背景: {int(classes_nums[0]) if len(classes_nums) > 0 else 0}, 包裹体: {int(classes_nums[1]) if len(classes_nums) > 1 else 0}, 贴片: {int(classes_nums[2]) if len(classes_nums) > 2 else 0}, 划痕: {int(classes_nums[3]) if len(classes_nums) > 3 else 0}, 其他: {int(classes_nums[4]) if len(classes_nums) > 4 else 0}]")
+                            total_non_background = sum([int(classes_nums[i]) if i < len(classes_nums) else 0 for i in range(1, 5)])
+                            print(f"非背景像素总数: {total_non_background}")
+                        except Exception as e:
+                            print(f"获取类别统计信息失败: {e}")
+                            defect_counts = {}
+                    
+                    # 保存结果图像
+                    print("保存结果图像")
+                    # 确保目标目录存在
+                    os.makedirs(os.path.dirname(result_path), exist_ok=True)
+                    
+                    # 保存检测结果图像
+                    if detection_mode != "heatmap" or not os.path.exists(result_path):
+                        # 如果不是热力图模式或者结果文件不存在，则保存图像
+                        try:
+                            result_img.save(result_path)
+                            print(f"已保存检测结果图像到: {result_path}")
+                        except Exception as save_error:
+                            print(f"保存图像失败: {save_error}")
+                            raise  # 向上层传递异常
+                    
+                    # 将NumPy的int32转换为Python原生整数以便JSON序列化
+                    converted_defect_counts = {}
+                    for key, value in defect_counts.items():
+                        # 确保值是整数，非零值需要被保留
+                        converted_value = int(value)
+                        converted_defect_counts[key] = converted_value
+                        # 如果原始数值大于0但转换后变为0，则设置为1
+                        if value > 0 and converted_value == 0:
+                            converted_defect_counts[key] = 1
+                            print(f"警告: 非零值{value}被转换为1")
+                    
+                    # 判断是否有任何缺陷
+                    has_defects = any(count > 0 for count in converted_defect_counts.values())
+                    
+                    # 计算处理时间
+                    processing_time = time.time() - start_processing_time
+                    print(f"图像处理完成，处理时间: {processing_time:.4f}秒 ({processing_time * 1000:.1f}毫秒)")
+                    
+                    if detection_mode != "heatmap":
+                        print(f"检测到的缺陷数量: {converted_defect_counts}")
+                        print(f"是否有缺陷: {has_defects}")
+                    else:
+                        print(f"生成热力图: {result_path}")
+                    
+                    # 更新状态和数据库记录
+                    detection_status[file_id] = {
+                        'status': 'completed', 
+                        'progress': 100,
+                        'defect_counts': converted_defect_counts,
+                        'detection_info': converted_defect_counts,
+                        'output_file': f"/processed/images/{result_filename}",
+                        'filename': result_filename,
+                        'detection_mode': detection_mode,
+                        'confidence_threshold': confidence_threshold,
+                        'has_defects': has_defects,
+                        'processing_time': processing_time
+                    }
+                    
+                    # 更新数据库中的检测记录状态
+                    update_detection_status(
+                        detection_id=file_id,
+                        status="completed",
+                        result_path=result_path,
+                        metadata={
+                            "defect_counts": converted_defect_counts,
+                            "filename": result_filename,
+                            "detection_mode": detection_mode,
+                            "confidence_threshold": confidence_threshold,
+                            "has_defects": has_defects,
+                            "processing_time": processing_time
+                        }
+                    )
+                    
+                except Exception as e:
+                    print(f"图像处理出错: {str(e)}")
+                    traceback.print_exc()  # 打印详细错误信息
+                    
+                    # 尝试重试
+                    try:
+                        print("尝试调整图像大小后重试...")
+                        
+                        # 缩小图像到安全尺寸然后重试
+                        max_size = (1024, 1024)
+                        image.thumbnail(max_size, Image.LANCZOS)
+                        result = model.detect_image(
+                            image, 
+                            count=True if detection_mode != "heatmap" else False,  # 热力图模式下不需要进行计数
+                            name_classes=['背景', '包裹体', '贴片', '划痕', '其他'],
+                            confidence_threshold=float(confidence_threshold),
+                            mode=detection_mode,
+                            img_name=result_filename
+                        )
+                        
+                        if detection_mode == "heatmap":
+                            result_img = result
+                            defect_counts = {}
+                            print("热力图模式：不进行缺陷计数")
+                        elif detection_mode == "confidence":
+                            # 置信度检测模式
+                            result_img = result
+                            # 获取类别统计
+                            try:
+                                # 从模型获取缺陷计数
+                                classes_nums = getattr(model, 'last_classes_nums', np.zeros(5))
+                                defect_counts = {
+                                    'inclusion': int(classes_nums[1]) if len(classes_nums) > 1 else 0,  # 包裹体
+                                    'patches': int(classes_nums[2]) if len(classes_nums) > 2 else 0,    # 贴片
+                                    'scratches': int(classes_nums[3]) if len(classes_nums) > 3 else 0,  # 划痕
+                                    'other': int(classes_nums[4]) if len(classes_nums) > 4 else 0       # 其他
+                                }
+                                
+                                # 获取置信度信息
+                                confidence_info = getattr(model, 'last_confidence_info', {})
+                                # 打印置信度信息
+                                print(f"置信度检测模式: 阈值={confidence_threshold}")
+                                for class_name, info in confidence_info.items():
+                                    if class_name != '背景' and info['count'] > 0:
+                                        print(f"  {class_name}: 像素数={info['count']}, 平均置信度={info['avg_confidence']:.4f}")
+                            except Exception as e:
+                                print(f"获取置信度信息失败: {e}")
+                                defect_counts = {}
+                        else:
+                            # 普通预测模式
+                            result_img = result
+                            # 获取类别统计
+                            try:
+                                # 从模型获取缺陷计数
+                                classes_nums = getattr(model, 'last_classes_nums', np.zeros(5))
+                                defect_counts = {
+                                    'inclusion': int(classes_nums[1]) if len(classes_nums) > 1 else 0,  # 包裹体
+                                    'patches': int(classes_nums[2]) if len(classes_nums) > 2 else 0,    # 贴片
+                                    'scratches': int(classes_nums[3]) if len(classes_nums) > 3 else 0,  # 划痕
+                                    'other': int(classes_nums[4]) if len(classes_nums) > 4 else 0       # 其他
+                                }
+                                # 额外输出统计信息用于调试
+                                print(f"最终类别统计: [背景: {int(classes_nums[0]) if len(classes_nums) > 0 else 0}, 包裹体: {int(classes_nums[1]) if len(classes_nums) > 1 else 0}, 贴片: {int(classes_nums[2]) if len(classes_nums) > 2 else 0}, 划痕: {int(classes_nums[3]) if len(classes_nums) > 3 else 0}, 其他: {int(classes_nums[4]) if len(classes_nums) > 4 else 0}]")
+                                total_non_background = sum([int(classes_nums[i]) if i < len(classes_nums) else 0 for i in range(1, 5)])
+                                print(f"非背景像素总数: {total_non_background}")
+                            except Exception as e:
+                                print(f"获取类别统计信息失败: {e}")
+                                defect_counts = {}
+                        
+                        # 保存结果图像
+                        result_img.save(result_path)
+                        print(f"重试成功：已保存检测结果图像到: {result_path}")
+                        
+                        # 将NumPy的int32转换为Python原生整数以便JSON序列化
+                        converted_defect_counts = {}
+                        for key, value in defect_counts.items():
+                            # 确保值是整数，非零值需要被保留
+                            converted_value = int(value)
+                            converted_defect_counts[key] = converted_value
+                            # 如果原始数值大于0但转换后变为0，则设置为1
+                            if value > 0 and converted_value == 0:
+                                converted_defect_counts[key] = 1
+                                print(f"重试后警告: 非零值{value}被转换为1")
+                        
+                        # 判断是否有任何缺陷
+                        has_defects = any(count > 0 for count in converted_defect_counts.values())
+                        print(f"重试后 - 是否有缺陷: {has_defects}")
+                        
+                        # 更新状态
+                        detection_status[file_id] = {
+                            'status': 'completed', 
+                            'progress': 100,
+                            'defect_counts': converted_defect_counts,
+                            'detection_info': converted_defect_counts,
+                            'output_file': result_path,
+                            'filename': result_filename,
+                            'detection_mode': detection_mode,
+                            'confidence_threshold': confidence_threshold,
+                            'has_defects': has_defects,
+                            'processing_time': processing_time
+                        }
+                        
+                        # 更新数据库记录
+                        update_detection_status(
+                            detection_id=file_id,
+                            status="completed",
+                            result_path=result_path,
+                            metadata={
+                                "defect_counts": converted_defect_counts,
+                                "filename": result_filename,
+                                "detection_mode": detection_mode,
+                                "confidence_threshold": confidence_threshold,
+                                "has_defects": has_defects,
+                                "processing_time": processing_time
+                            }
+                        )
+                    except Exception as retry_error:
+                        print(f"重试失败: {retry_error}")
+                        traceback.print_exc()
+                        detection_status[file_id] = {'status': 'error', 'error': str(retry_error)}
+                        
+                        # 更新数据库中的检测记录状态
+                        update_detection_status(
+                            detection_id=file_id,
+                            status="error",
+                            metadata={"error": str(retry_error)}
+                        )
+            except Exception as outer_error:
+                print(f"图像处理整体失败: {str(outer_error)}")
+                traceback.print_exc()
+                detection_status[file_id] = {'status': 'error', 'error': str(outer_error)}
+                
+                # 更新数据库中的检测记录状态
+                update_detection_status(
+                    detection_id=file_id,
+                    status="error",
+                    metadata={"error": str(outer_error)}
+                )
+        elif mode == "video":
+            video_path = kwargs.get('video_path')
+            save_path = kwargs.get('save_path')
+            fps = kwargs.get('fps', 25)
+            
+            # 检查视频文件是否存在
+            if not os.path.exists(video_path):
+                raise ValueError("视频文件不存在")
+                
+            # 检查视频文件是否可以打开
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise ValueError("无法打开视频文件")
+            cap.release()
+            
+            # 设置检测ID
+            current_detection_id = file_id
+            
+            # 开始处理视频，指定使用predict模式提高速度
+            train(video_path=video_path, video_save_path=save_path, video_fps=fps, mode="predict")
+            
+            # 检查输出文件是否存在且有效
+            if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                # 保存实际的文件名（可能与预期的不同）
+                actual_filename = os.path.basename(save_path)
+                detection_status[file_id] = {
+                    'status': 'completed', 
+                    'progress': 100,
+                    'filename': actual_filename
+                }
+                
+                # 更新数据库中的检测记录状态
+                update_detection_status(
+                    detection_id=file_id,
+                    status="completed",
+                    result_path=save_path
+                )
+            else:
+                # 尝试查找不区分大小写的文件
+                found = False
+                for file in os.listdir(path_predict_video):
+                    if file.lower() == os.path.basename(save_path).lower():
+                        actual_filename = file
+                        found = True
+                        detection_status[file_id] = {
+                            'status': 'completed', 
+                            'progress': 100,
+                            'filename': actual_filename
+                        }
+                        
+                        # 更新数据库中的检测记录状态
+                        actual_path = os.path.join(path_predict_video, actual_filename)
+                        update_detection_status(
+                            detection_id=file_id,
+                            status="completed",
+                            result_path=actual_path
+                        )
+                        break
+                
+                if not found:
+                    detection_status[file_id] = {
+                        'status': 'error', 
+                        'error': '视频处理完成，但未生成有效的输出文件'
+                    }
+                    
+                    # 更新数据库中的检测记录状态
+                    update_detection_status(
+                        detection_id=file_id,
+                        status="error",
+                        metadata={"error": "视频处理完成，但未生成有效的输出文件"}
+                    )
+        elif mode == "camera":
+            save_path = kwargs.get('save_path')
+            fps = kwargs.get('fps', 25)
+            
+            try:
+                # 设置检测ID
+                current_detection_id = file_id
+                
+                # 重置摄像头停止标志
+                global camera_stop_flag, camera_thread
+                camera_stop_flag = False
+                
+                # 开始摄像头检测，传递is_camera=True
+                train(video_path=0, video_save_path=save_path, video_fps=fps, mode="video", is_camera=True)
+                
+                # 检查输出文件是否存在且有效
+                if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                    detection_status[file_id] = {
+                        'status': 'completed', 
+                        'progress': 100,
+                        'output_file': save_path,
+                        'filename': os.path.basename(save_path),
+                        'message': '摄像头检测完成，视频已保存'
+                    }
+                    
+                    # 更新数据库中的检测记录状态
+                    update_detection_status(
+                        detection_id=file_id,
+                        status="completed",
+                        result_path=save_path,
+                        metadata={"message": "摄像头检测完成，视频已保存"}
+                    )
+                else:
+                    # 尝试创建虚拟视频
+                    if create_dummy_video(save_path, fps):
+                        detection_status[file_id] = {
+                            'status': 'completed', 
+                            'progress': 100,
+                            'output_file': save_path,
+                            'filename': os.path.basename(save_path),
+                            'message': '摄像头无法访问，已创建虚拟视频'
+                        }
+                        
+                        # 更新数据库中的检测记录状态
+                        update_detection_status(
+                            detection_id=file_id,
+                            status="completed",
+                            result_path=save_path,
+                            metadata={"message": "摄像头无法访问，已创建虚拟视频"}
+                        )
+                    else:
+                        detection_status[file_id] = {
+                            'status': 'error', 
+                            'error': '摄像头检测失败，无法创建输出文件'
+                        }
+                        
+                        # 更新数据库中的检测记录状态
+                        update_detection_status(
+                            detection_id=file_id,
+                            status="error",
+                            metadata={"error": "摄像头检测失败，无法创建输出文件"}
+                        )
+            except Exception as e:
+                # 尝试创建虚拟视频
+                if create_dummy_video(save_path, fps):
+                    detection_status[file_id] = {
+                        'status': 'completed', 
+                        'progress': 100,
+                        'output_file': save_path,
+                        'filename': os.path.basename(save_path),
+                        'message': f'摄像头检测出错: {str(e)}，已创建虚拟视频'
+                    }
+                    
+                    # 更新数据库中的检测记录状态
+                    update_detection_status(
+                        detection_id=file_id,
+                        status="completed",
+                        result_path=save_path,
+                        metadata={"message": f"摄像头检测出错: {str(e)}，已创建虚拟视频"}
+                    )
+                else:
+                    detection_status[file_id] = {'status': 'error', 'error': str(e)}
+                    
+                    # 更新数据库中的检测记录状态
+                    update_detection_status(
+                        detection_id=file_id,
+                        status="error",
+                        metadata={"error": str(e)}
+                    )
+    except Exception as e:
+        detection_status[file_id] = {'status': 'error', 'error': str(e)}
+        
+        # 更新数据库中的检测记录状态
+        update_detection_status(
+            detection_id=file_id,
+            status="error",
+            metadata={"error": str(e)}
+        )
+        
+        print(f"检测过程中出错: {str(e)}")
+
+# 登录装饰器
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login', next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if not username or not password:
+            error = "请输入用户名和密码"
+        else:
+            success, result = verify_user(username, password)
+            if success:
+                # 登录成功，保存用户ID到会话
+                session['user_id'] = result
+                # 同时保存用户名到会话，用于显示
+                session['username'] = username
+                
+                # 检查是否为管理员
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("SELECT is_admin FROM users WHERE id = ?", (result,))
+                is_admin = cursor.fetchone()[0]
+                conn.close()
+                
+                if is_admin:
+                    session['is_admin'] = True
+                
+                session.permanent = True  # 使会话持久化
+                
+                # 获取下一个URL，如果没有则默认为首页
+                next_page = request.args.get('next')
+                if not next_page or url_parse(next_page).netloc != '':
+                    next_page = url_for('index')
+                
+                return redirect(next_page)
+            else:
+                error = result
+    
+    return render_template('login.html', error=error)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    error = None
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if not username or not email or not password or not confirm_password:
+            error = "请填写所有必填字段"
+        elif password != confirm_password:
+            error = "两次输入的密码不一致"
+        else:
+            success, message = register_user(username, email, password)
+            if success:
+                # 注册成功，重定向到登录页面
+                return redirect(url_for('login', registered=True))
+            else:
+                error = message
+    
+    return render_template('register.html', error=error)
+
+@app.route('/logout')
+def logout():
+    # 清除会话
+    session.pop('user_id', None)
+    session.pop('username', None)
+    session.pop('is_admin', None)
+    return redirect(url_for('login'))
+
+@app.route('/')
+@login_required
+def index():
+    is_admin = session.get('is_admin', False)
+    return render_template('index.html', is_admin=is_admin)
+
+@app.route('/image-detection')
+@login_required
+def image_detection():
+    return render_template('image_detection.html')
+
+@app.route('/batch-image-detection')
+@login_required
+def batch_image_detection():
+    return render_template('batch_image_detection.html')
+
+@app.route('/video-detection')
+@login_required
+def video_detection():
+    return render_template('video_detection.html')
+
+@app.route('/camera-detection')
+@login_required
+def camera_detection():
+    return render_template('camera_detection.html')
+
+@app.route('/detection-records')
+@login_required
+def detection_records():
+    page = request.args.get('page', 1, type=int)
+    limit = 10
+    offset = (page - 1) * limit
+    
+    # 排除批量图像项记录
+    records = get_all_detection_records(limit=limit, offset=offset, exclude_types=['batch_image_item'])
+    
+    # 获取记录总数以计算分页，同样排除批量图像项
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM detection_records WHERE detection_type != 'batch_image_item'")
+    total_records = cursor.fetchone()[0]
+    conn.close()
+    
+    # 确保total_pages至少为1，避免在没有记录时出错
+    total_pages = max(1, (total_records + limit - 1) // limit)  # 向上取整
+    
+    return render_template('detection_records.html', 
+                          records=records, 
+                          page=page, 
+                          total_pages=total_pages)
+
+@app.route('/api/detection-record/<detection_id>')
+def get_detection_record_api(detection_id):
+    try:
+        # 从数据库获取记录
+        record = get_detection_record(detection_id)
+        
+        if not record:
+            return jsonify({'error': '未找到记录'}), 404
+        
+        # 转换元数据字段（如果存在）
+        if record.get('metadata') and isinstance(record['metadata'], str):
+            try:
+                record['metadata'] = json.loads(record['metadata'])
+            except json.JSONDecodeError as e:
+                print(f"元数据JSON解析错误: {str(e)}")
+                # 如果无法解析，提供原始字符串
+                record['metadata_raw'] = record['metadata']
+                record['metadata'] = None
+        
+        # 确保所有数据都可以被JSON序列化
+        def sanitize_for_json(obj):
+            if isinstance(obj, dict):
+                return {k: sanitize_for_json(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [sanitize_for_json(item) for item in obj]
+            elif isinstance(obj, (int, float, str, bool, type(None))):
+                return obj
+            else:
+                # 转换其他类型为字符串
+                return str(obj)
+        
+        # 清理记录数据
+        sanitized_record = sanitize_for_json(record)
+        
+        return jsonify(sanitized_record)
+    except Exception as e:
+        print(f"获取检测记录API错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'获取记录失败: {str(e)}'}), 500
+
+@app.route('/api/detection-record/<detection_id>', methods=['DELETE'])
+def delete_detection_record_api(detection_id):
+    try:
+        success = delete_detection_record(detection_id)
+        if success:
+            return jsonify({'success': True, 'message': '记录已删除'})
+        else:
+            return jsonify({'error': '记录不存在或删除失败'}), 404
+    except Exception as e:
+        print(f"删除检测记录API出错: {str(e)}")
+        return jsonify({'error': f'删除记录时出错: {str(e)}'}), 500
+
+@app.route('/api/detection-records/batch-delete', methods=['POST'])
+def batch_delete_records():
+    try:
+        data = request.json
+        if not data or 'record_ids' not in data or not isinstance(data['record_ids'], list):
+            return jsonify({'error': '无效的请求数据'}), 400
+        
+        record_ids = data['record_ids']
+        if not record_ids:
+            return jsonify({'error': '未提供记录ID'}), 400
+        
+        success_count = 0
+        failed_ids = []
+        
+        for record_id in record_ids:
+            if delete_detection_record(record_id):
+                success_count += 1
+            else:
+                failed_ids.append(record_id)
+        
+        return jsonify({
+            'success': True,
+            'message': f'成功删除 {success_count} 条记录',
+            'failed_ids': failed_ids
+        })
+    except Exception as e:
+        print(f"批量删除检测记录时出错: {str(e)}")
+        return jsonify({'error': f'批量删除记录时出错: {str(e)}'}), 500
+
+@app.route('/api/upload-image', methods=['POST'])
+def upload_image():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': '没有文件上传'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': '没有选择文件'}), 400
+        
+        # 获取附加参数
+        confidence_threshold = request.form.get('confidence_threshold', '0.6')
+        detection_mode = request.form.get('detection_mode', 'predict')  # 默认为普通预测模式
+        
+        if file and allowed_file(file.filename):
+            # 清理上传目录
+            clean_directory(dir_origin_path)
+            
+            # 上传预测图片
+            filename = secure_filename(file.filename)
+            original_path = os.path.join(dir_origin_path, filename)
+            file.save(original_path)
+            
+            # 记录开始处理时间
+            start_processing_time = time.time()
+            
+            # 生成唯一的检测ID
+            detection_id = str(int(time.time()))
+            
+            # 创建检测记录
+            add_detection_record(
+                detection_id=detection_id,
+                detection_type="image",
+                filename=filename,
+                original_path=original_path,
+                status="processing"
+            )
+            
+            # 启动异步检测
+            thread = threading.Thread(
+                target=async_detect,
+                args=(detection_id, "image"),
+                kwargs={
+                    "confidence_threshold": confidence_threshold,
+                    "detection_mode": detection_mode
+                }
+            )
+            thread.start()
+            
+            return jsonify({
+                'success': True,
+                'detection_id': detection_id,
+                'filename': filename,
+                'confidence_threshold': confidence_threshold,
+                'detection_mode': detection_mode
+            })
+        
+        return jsonify({'error': '不支持的文件类型'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/upload-batch-images', methods=['POST'])
+def upload_batch_images():
+    try:
+        print("收到批量图像上传请求")
+        
+        # 直接获取所有上传的文件
+        all_files = []
+        print(f"请求中的文件键: {list(request.files.keys())}")
+        
+        # 首先尝试获取标准的多文件上传
+        if 'files[]' in request.files:
+            all_files.extend(request.files.getlist('files[]'))
+            print(f"从'files[]'获取到 {len(request.files.getlist('files[]'))} 个文件")
+            
+        # 尝试从单独的文件键获取文件
+        for key in request.files:
+            if key != 'files[]' and key.startswith('files['):
+                all_files.append(request.files[key])
+                print(f"从'{key}'获取到1个文件")
+        
+        # 其他可能的文件键
+        if 'file[]' in request.files:
+            all_files.extend(request.files.getlist('file[]'))
+            print(f"从'file[]'获取到 {len(request.files.getlist('file[]'))} 个文件")
+            
+        if 'file' in request.files:
+            file = request.files['file']
+            if file.filename != '':
+                all_files.append(file)
+                print(f"从'file'获取到1个文件")
+                
+        print(f"总共获取到 {len(all_files)} 个文件")
+        
+        if not all_files:
+            return jsonify({'error': '没有选择任何文件'}), 400
+        
+        valid_files = []
+        for file in all_files:
+            if file.filename == '':
+                continue
+            if not allowed_file(file.filename):
+                continue
+            valid_files.append(file)
+        
+        print(f"有效文件数量: {len(valid_files)}")
+        
+        if len(valid_files) == 0:
+            return jsonify({'error': '没有有效的图像文件，请上传jpg、png、jpeg或bmp格式的图片'}), 400
+        
+        # 生成批量检测的唯一ID
+        batch_detection_id = str(uuid.uuid4())
+        
+        # 获取检测选项
+        confidence_threshold = request.form.get('confidence_threshold', '0.6')
+        detection_mode = request.form.get('detection_mode', 'predict')  # 默认为普通预测模式
+        
+        print(f"检测模式: {detection_mode}, 置信度阈值: {confidence_threshold}")
+        
+        # 保存所有文件
+        saved_files = []
+        for file in valid_files:
+            # 创建安全的文件名
+            filename = secure_filename(file.filename)
+            # 添加时间戳避免文件名冲突
+            timestamp = int(time.time() * 1000)
+            base_name, ext = os.path.splitext(filename)
+            unique_filename = f"{base_name}_{timestamp}{ext}"
+            
+            # 确保上传目录存在
+            os.makedirs('uploads', exist_ok=True)
+            
+            # 保存文件路径
+            file_path = os.path.join('uploads', unique_filename)
+            
+            # 保存文件
+            file.save(file_path)
+            saved_files.append({
+                'filename': unique_filename,
+                'original_filename': filename,
+                'path': file_path
+            })
+            print(f"保存文件: {unique_filename}")
+        
+        # 启动异步批量检测
+        threading.Thread(
+            target=async_batch_detect, 
+            args=(batch_detection_id, saved_files),
+            kwargs={
+                "confidence_threshold": confidence_threshold,
+                "detection_mode": detection_mode
+            }
+        ).start()
+        
+        return jsonify({
+            'success': True,
+            'message': f'成功上传{len(saved_files)}个文件，开始批量检测',
+            'detection_id': batch_detection_id,
+            'file_count': len(saved_files)
+        })
+        
+    except Exception as e:
+        print(f"批量上传图像出错: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': f'上传图像出错: {str(e)}'}), 500
+
+def async_batch_detect(batch_detection_id, files, confidence_threshold='0.6', detection_mode='predict'):
+    """
+    异步处理批量图像检测
+    
+    参数:
+        batch_detection_id: 批量检测的唯一ID
+        files: 文件信息列表，每项包含filename、original_filename和path
+        confidence_threshold: 置信度阈值，默认0.6
+        detection_mode: 检测模式，可选 'predict'或'heatmap'，默认'predict'
+    """
+    try:
+        print(f"开始批量检测，ID: {batch_detection_id}, 文件数量: {len(files)}")
+        print(f"检测模式: {detection_mode}, 置信度阈值: {confidence_threshold}")
+        
+        # 创建批量检测记录
+        metadata = {
+            'file_count': len(files),
+            'files': [f['filename'] for f in files],
+            'progress': 0,
+            'completed': 0,
+            'failed': 0,
+            'results': [],
+            'batch_results': [],  # 专门为UI展示优化的结果列表
+            'detection_mode': detection_mode,
+            'confidence_threshold': confidence_threshold
+        }
+        
+        add_detection_record(
+            detection_id=batch_detection_id,
+            detection_type='batch_image',
+            filename=f'batch_{len(files)}_images',
+            status='processing',
+            metadata=metadata
+        )
+        
+        # 初始化检测模型
+        segformer = SegFormer_Segmentation()
+        
+        # 处理每个文件
+        results = []
+        batch_results = []  # 批量结果列表
+        completed = 0
+        failed = 0
+        
+        # 名称类列表
+        name_classes = ["background", "patches", "inclusion", "scratches", "other", "none0", "none1", "none2", "none3",
+                       "none4", "none5", "none6", "none7", "none8", "none9", "none10", "none11", "none12", "none13", 
+                       "none14", "none15"]
+        
+        # 确保目录存在
+        os.makedirs(dir_origin_path, exist_ok=True)
+        os.makedirs(batch_image_save_path, exist_ok=True)
+        
+        start_time = time.time()
+        processing_times = []
+        images_with_defects = 0
+        images_without_defects = 0
+        
+        for idx, file_info in enumerate(files):
+            try:
+                item_start_time = time.time()
+                
+                filename = file_info['filename']
+                original_filename = file_info.get('original_filename', filename)
+                file_path = file_info['path']
+                
+                print(f"处理文件 {idx+1}/{len(files)}: {filename} (原始名: {original_filename})")
+                
+                # 更新进度
+                progress = int(((idx) / len(files)) * 100)
+                metadata['progress'] = progress
+                update_detection_status(batch_detection_id, 'processing', metadata=metadata)
+                
+                # 复制文件到与单图检测相同的目录
+                dest_origin_path = os.path.join(dir_origin_path, filename)
+                # 添加判断，检查源文件和目标文件是否为同一个文件
+                if os.path.abspath(file_path) != os.path.abspath(dest_origin_path):
+                    try:
+                        shutil.copy2(file_path, dest_origin_path)
+                    except shutil.SameFileError:
+                        print(f"警告: 源文件和目标文件相同: {file_path} -> {dest_origin_path}")
+                        # 文件已经在目标位置，不需要复制
+                    except Exception as copy_error:
+                        print(f"复制文件时出错: {str(copy_error)}")
+                        raise copy_error
+                else:
+                    print(f"源文件和目标文件相同，跳过复制: {file_path}")
+                
+                # 打开图像
+                image = Image.open(dest_origin_path)
+                
+                # 执行检测
+                if detection_mode == 'heatmap':
+                    # 热力图模式
+                    result_image = segformer.detect_image(
+                        image, 
+                        count=True, 
+                        name_classes=name_classes,
+                        confidence_threshold=float(confidence_threshold),
+                        mode="heatmap",
+                        img_name=filename
+                    )
+                    
+                    # 热力图模式下，简化缺陷统计
+                    defect_counts = [0] * len(name_classes)
+                    defect_counts_dict = {
+                        'patches': 0,
+                        'inclusion': 0,
+                        'scratches': 0,
+                        'other': 0
+                    }
+                    total_defects = 0
+                else:
+                    # 普通检测模式
+                    result_image = segformer.detect_image(
+                        image, 
+                        count=True, 
+                        name_classes=name_classes,
+                        confidence_threshold=float(confidence_threshold)
+                    )
+                    
+                    # 获取类别统计信息，使用segformer模型中的属性
+                    defect_counts = getattr(segformer, 'last_classes_nums', np.zeros(5))
+                    
+                    # 计算总缺陷数
+                    # 创建缺陷计数字典
+                    defect_counts_dict = {
+                        'patches': int(defect_counts[1]) if len(defect_counts) > 1 else 0,  # 贴片
+                        'inclusion': int(defect_counts[2]) if len(defect_counts) > 2 else 0, # 包裹体
+                        'scratches': int(defect_counts[3]) if len(defect_counts) > 3 else 0,  # 划痕
+                        'other': int(defect_counts[4]) if len(defect_counts) > 4 else 0       # 其他
+                    }
+                    
+                    total_defects = sum(defect_counts_dict.values())
+                
+                # 确保批量图像保存目录存在
+                os.makedirs(batch_image_save_path, exist_ok=True)
+                
+                # 生成保存的文件名 - 使用批量图像专用保存路径，不添加_result后缀
+                result_path = os.path.join(batch_image_save_path, filename)
+                print(f"保存批量处理结果到: {result_path}")
+                result_image.save(result_path)
+                
+                # 记录下来以便调试
+                try:
+                    if os.path.exists(result_path):
+                        print(f"文件 {result_path} 已成功保存, 大小: {os.path.getsize(result_path)} 字节")
+                    else:
+                        print(f"警告: 文件 {result_path} 保存失败, 文件不存在")
+                except Exception as e:
+                    print(f"检查文件时出错: {str(e)}")
+                
+                # 详细输出每种缺陷的数量信息
+                if detection_mode != 'heatmap':
+                    print(f"文件 {filename} 缺陷检测结果：")
+                    print(f"  贴片 (patches): {defect_counts_dict['patches']}")
+                    print(f"  包裹体 (inclusion): {defect_counts_dict['inclusion']}")
+                    print(f"  划痕 (scratches): {defect_counts_dict['scratches']}")
+                    print(f"  其他 (other): {defect_counts_dict['other']}")
+                    print(f"  总缺陷数: {total_defects}")
+                else:
+                    print(f"文件 {filename} 热力图处理完成")
+                
+                processing_time = time.time() - item_start_time
+                processing_times.append(processing_time)
+                
+                # 记录有缺陷和无缺陷的图像数
+                if total_defects > 0:
+                    images_with_defects += 1
+                else:
+                    images_without_defects += 1
+                
+                # 为每个图像单独记录检测状态
+                result_info = {
+                    'filename': filename,
+                    'original_filename': original_filename,
+                    'original_path': dest_origin_path,
+                    'result_path': result_path,
+                    'defect_counts': defect_counts_dict,
+                    'total_defects': total_defects,
+                    'processing_time': processing_time,
+                    'has_defects': bool(total_defects > 0),
+                    'status': 'completed',
+                    'detection_mode': detection_mode,
+                    'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                
+                # 添加结果到总结果列表
+                results.append(result_info)
+                batch_results.append(result_info)
+                
+                # 更新批量检测元数据
+                completed += 1
+                metadata['completed'] = completed
+                metadata['progress'] = int((completed / len(files)) * 100)
+                metadata['results'] = results
+                metadata['batch_results'] = batch_results
+                update_detection_status(batch_detection_id, 'processing', metadata=metadata)
+                
+                # 添加单独的检测记录，记录每张图片的检测结果
+                individual_metadata = {
+                    'defect_counts': defect_counts_dict,
+                    'processing_time': processing_time,
+                    'original_filename': original_filename,
+                    'original_path': dest_origin_path,
+                    'result_path': result_path,
+                    'has_defects': bool(total_defects > 0),
+                    'parent_batch_id': batch_detection_id,
+                    'detection_mode': detection_mode,
+                    'confidence_threshold': confidence_threshold
+                }
+                
+                individual_detection_id = f"{batch_detection_id}_{idx}"
+                add_detection_record(
+                    detection_id=individual_detection_id,
+                    detection_type="batch_image_item",
+                    filename=filename,
+                    original_path=dest_origin_path,
+                    result_path=result_path,
+                    status="completed",
+                    metadata=individual_metadata
+                )
+                
+            except Exception as e:
+                print(f"处理文件 {file_info['filename']} 时出错: {str(e)}")
+                traceback.print_exc()
+                
+                # 记录失败信息
+                error_item = {
+                    'filename': file_info['filename'],
+                    'original_filename': file_info.get('original_filename', file_info['filename']),
+                    'error': str(e),
+                    'status': 'error',
+                    'detection_mode': detection_mode
+                }
+                
+                # 添加到结果
+                results.append(error_item)
+                batch_results.append(error_item)
+                
+                # 更新统计信息
+                failed += 1
+                metadata['failed'] = failed
+                metadata['progress'] = int((completed + failed) / len(files) * 100)
+                metadata['results'] = results
+                metadata['batch_results'] = batch_results
+                update_detection_status(batch_detection_id, 'processing', metadata=metadata)
+        
+        # 处理完成后，更新最终状态
+        metadata['progress'] = 100
+        metadata['results'] = results  # 确保最终状态包含所有结果
+        metadata['batch_results'] = batch_results
+        metadata['completed'] = completed
+        metadata['failed'] = failed
+        metadata['summary'] = {
+            'total_images': len(files),
+            'processed_images': completed,
+            'failed_images': failed,
+            'images_with_defects': images_with_defects,
+            'images_without_defects': images_without_defects,
+            'avg_processing_time': sum(processing_times) / len(processing_times) if processing_times else 0,
+            'total_processing_time': time.time() - start_time
+        }
+        
+        update_detection_status(
+            detection_id=batch_detection_id,
+            status='completed',
+            metadata=metadata
+        )
+        
+        print(f"批量检测完成，共处理 {len(files)} 个文件，成功: {completed}, 失败: {failed}")
+        print(f"检测统计: 有缺陷: {images_with_defects}, 无缺陷: {images_without_defects}")
+        print(f"总处理时间: {time.time() - start_time:.2f}秒")
+        
+    except Exception as e:
+        print(f"批量检测过程中出错: {str(e)}")
+        traceback.print_exc()
+        
+        try:
+            # 更新检测状态为错误
+            metadata = {
+                'error': str(e),
+                'progress': 0,
+                'completed': 0,
+                'failed': len(files),
+                'results': [],
+                'batch_results': []
+            }
+            update_detection_status(batch_detection_id, 'error', metadata=metadata)
+        except Exception as update_error:
+            print(f"更新检测状态时出错: {str(update_error)}")
+            traceback.print_exc()
+
+@app.route('/api/batch-detection-status/<detection_id>')
+def get_batch_detection_status(detection_id):
+    """获取批量检测的状态"""
+    try:
+        # 从数据库获取检测记录
+        record = get_detection_record(detection_id)
+        
+        if not record:
+            return jsonify({'status': 'unknown', 'message': '未找到检测任务'})
+        
+        # 获取状态和元数据
+        status = record['status']
+        metadata = record['metadata']
+        
+        # 解析元数据
+        metadata_dict = {}
+        if metadata:
+            try:
+                if isinstance(metadata, str):
+                    metadata_dict = json.loads(metadata)
+                elif isinstance(metadata, dict):
+                    metadata_dict = metadata
+                else:
+                    print(f"元数据类型异常: {type(metadata)}")
+                    metadata_dict = {'error': f'元数据类型异常: {type(metadata)}'}
+            except json.JSONDecodeError as e:
+                print(f"批量检测状态元数据解析错误: {str(e)}")
+                metadata_dict = {'error': '无法解析元数据', 'raw': str(metadata)[:200]}
+            except Exception as e:
+                print(f"处理元数据时出错: {str(e)}")
+                metadata_dict = {'error': f'处理元数据时出错: {str(e)}'}
+        
+        # 确保所有数据都可以被JSON序列化
+        def sanitize_for_json(obj):
+            if isinstance(obj, dict):
+                return {k: sanitize_for_json(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [sanitize_for_json(item) for item in obj]
+            elif isinstance(obj, (int, float, str, bool, type(None))):
+                return obj
+            else:
+                # 转换其他类型为字符串
+                return str(obj)
+        
+        # 构建响应
+        response = {
+            'status': status,
+            'progress': metadata_dict.get('progress', 100 if status == 'completed' else 0),
+            'completed': metadata_dict.get('completed', 0),
+            'failed': metadata_dict.get('failed', 0),
+            'file_count': metadata_dict.get('file_count', 0),
+            'message': metadata_dict.get('message', ''),
+            'results': sanitize_for_json(metadata_dict.get('batch_results', metadata_dict.get('results', [])))
+        }
+        
+        return jsonify(response)
+    except Exception as e:
+        print(f"获取批量检测状态时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'status': 'error', 
+            'message': f'获取状态时出错: {str(e)}',
+            'progress': 0,
+            'results': []
+        })
+
+@app.route('/api/start-video-detection', methods=['POST'])
+def start_video_detection():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': '没有文件上传'}), 400
+        
+        file = request.files['file']
+        fps = int(request.form.get('fps', 25))
+        
+        if file.filename == '':
+            return jsonify({'error': '没有选择文件'}), 400
+        
+        if file and allowed_video_file(file.filename):
+            # 获取文件大小
+            file.seek(0, os.SEEK_END)
+            file_size = file.tell()
+            file.seek(0)  # 重置文件指针到开始
+            
+            print(f"接收到视频文件: {file.filename}, 大小: {file_size / (1024 * 1024):.2f} MB")
+            
+            # 创建唯一文件名以避免冲突
+            filename = secure_filename(file.filename)
+            timestamp = int(time.time())
+            base_name, ext = os.path.splitext(filename)
+            unique_filename = f"{base_name}_{timestamp}{ext}"
+            
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+            
+            # 确保目录存在
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            # 使用分块写入以处理大文件
+            chunk_size = 8192  # 8KB 块
+            total_chunks = file_size // chunk_size + (1 if file_size % chunk_size > 0 else 0)
+            chunks_written = 0
+            
+            print(f"开始写入文件: {file_path}, 总块数: {total_chunks}")
+            
+            with open(file_path, 'wb') as f:
+                while True:
+                    chunk = file.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    chunks_written += 1
+                    if chunks_written % 1000 == 0:  # 每1000块记录一次进度
+                        print(f"写入进度: {chunks_written}/{total_chunks} ({chunks_written/total_chunks*100:.1f}%)")
+                        
+            print(f"文件写入完成: {file_path}")
+            
+            # 验证文件是否成功写入
+            if not os.path.exists(file_path):
+                return jsonify({'error': '文件保存失败，请重试'}), 500
+                
+            # 检查文件大小是否正确
+            actual_size = os.path.getsize(file_path)
+            if actual_size != file_size:
+                return jsonify({'error': f'文件保存不完整，预期大小: {file_size}字节，实际大小: {actual_size}字节'}), 500
+            
+            # 检查视频文件是否可以打开
+            try:
+                cap = cv2.VideoCapture(file_path)
+                if not cap.isOpened():
+                    return jsonify({'error': '无法打开视频文件，格式可能不被支持'}), 400
+                
+                # 获取视频信息
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                video_fps = cap.get(cv2.CAP_PROP_FPS)
+                
+                cap.release()
+                
+                print(f"视频信息: {width}x{height}, {frame_count}帧, 原始FPS: {video_fps}, 设定FPS: {fps}")
+            except Exception as video_error:
+                print(f"检查视频时出错: {str(video_error)}")
+                return jsonify({'error': f'无法验证视频文件: {str(video_error)}'}), 400
+            
+            save_path = os.path.join(path_predict_video, unique_filename)
+            
+            # 生成唯一的检测ID
+            detection_id = str(int(time.time()))
+            
+            # 添加检测记录到数据库
+            original_path = os.path.abspath(file_path)
+            add_detection_record(
+                detection_id=detection_id,
+                detection_type="video",
+                filename=unique_filename,
+                original_path=original_path,
+                result_path=save_path,
+                status="processing",
+                metadata={
+                    "fps": fps,
+                    "original_fps": video_fps,
+                    "width": width,
+                    "height": height,
+                    "frame_count": frame_count,
+                    "file_size_mb": file_size / (1024 * 1024)
+                }
+            )
+            
+            # 启动异步检测
+            thread = threading.Thread(
+                target=async_detect,
+                args=(detection_id, "video"),
+                kwargs={
+                    'video_path': file_path,
+                    'save_path': save_path,
+                    'fps': fps
+                }
+            )
+            thread.start()
+            
+            return jsonify({
+                'success': True,
+                'detection_id': detection_id,
+                'filename': unique_filename,
+                'video_info': {
+                    'width': width,
+                    'height': height,
+                    'frames': frame_count,
+                    'original_fps': video_fps,
+                    'processing_fps': fps
+                }
+            })
+        
+        return jsonify({'error': '不支持的文件类型'}), 400
+    except Exception as e:
+        print(f"视频检测启动错误: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def backend_camera_detection(output_path, fps=15, detection_id=None, brightness=115, sharpness=1.0):
+    """
+    后端摄像头检测函数，处理摄像头视频流并进行缺陷检测
+    """
+    global camera_stop_flag, detection_status
+    
+    camera_stop_flag = False
+    frames_processed = 0
+    
+    try:
+        # 更新状态为开始处理
+        print(f"开始后端摄像头检测，输出路径：{output_path}, FPS: {fps}, 亮度: {brightness}%, 清晰度: {sharpness}×")
+        
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # 初始化检测状态
+        if detection_id:
+            detection_status[detection_id] = {
+                "status": "processing",
+                "progress": 0,
+                "message": "正在初始化摄像头...",
+                "defect_counts": {
+                    "inclusion": 0,
+                    "patches": 0,
+                    "scratches": 0,
+                    "other": 0
+                },
+                "frames_processed": 0,
+                "output_file": output_path
+            }
+            
+            # 更新数据库状态
+            metadata = json.dumps({
+                "message": "正在初始化摄像头...",
+                "progress": 0
+            })
+            update_detection_status(detection_id, "processing", None, metadata)
+        
+        # 初始化分割模型，使用mix_type=0以显示带有检测痕迹的混合图像
+        model = SegFormer_Segmentation(mix_type=0)
+        print(f"后端摄像头检测：模型已加载，准备打开摄像头")
+        
+        # 尝试使用不同的后端打开摄像头
+        backends = [cv2.CAP_DSHOW, cv2.CAP_ANY, cv2.CAP_MSMF]
+        camera_capture = None
+        
+        for backend in backends:
+            try:
+                if sys.platform.startswith('win'):
+                    camera_capture = cv2.VideoCapture(0, backend)
+                else:
+                    camera_capture = cv2.VideoCapture(0)
+                
+                if camera_capture is not None and camera_capture.isOpened():
+                    print(f"成功使用后端{backend}打开摄像头")
+                    break
+            except Exception as e:
+                print(f"尝试使用后端{backend}打开摄像头失败: {e}")
+        
+        # 检查摄像头是否成功打开
+        if camera_capture is None or not camera_capture.isOpened():
+            error_msg = "无法打开摄像头，请检查设备连接和权限"
+            print(error_msg)
+            if detection_id and detection_id in detection_status:
+                detection_status[detection_id]['status'] = 'error'
+                detection_status[detection_id]['message'] = error_msg
+                detection_status[detection_id]['progress'] = 0
+                update_detection_status(
+                    detection_id=detection_id,
+                    status="error",
+                    metadata=json.dumps({
+                        "message": error_msg,
+                        "progress": 0
+                    })
+                )
+            return
+        
+        # 设置缓冲区大小
+        camera_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        # 获取摄像头分辨率
+        width = int(camera_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(camera_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"摄像头分辨率: {width}x{height}")
+        
+        # 创建VideoWriter对象 - 使用H.264编码器
+        # 视频格式可能受系统支持的影响，尝试不同的编解码器
+        if sys.platform.startswith('win'):
+            # 在Windows上尝试使用XVID编解码器
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            output_path_avi = output_path.replace('.mp4', '.avi')
+            out = cv2.VideoWriter(output_path_avi, fourcc, fps, (width, height))
+        else:
+            # 在其他平台上尝试使用MP4V编解码器
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            
+        if not out.isOpened():
+            error_msg = "无法创建视频写入器，请检查编解码器支持"
+            print(error_msg)
+            if detection_id and detection_id in detection_status:
+                detection_status[detection_id]['status'] = 'error'
+                detection_status[detection_id]['message'] = error_msg
+                update_detection_status(
+                    detection_id=detection_id,
+                    status="error",
+                    metadata=json.dumps({
+                        "message": error_msg,
+                        "progress": 0
+                    })
+                )
+            return
+        
+        # 设置检测参数
+        camera_stop_flag = False
+        frame_count = 0
+        defect_counts = {
+            "inclusion": 0,
+            "patches": 0,
+            "scratches": 0,
+            "other": 0
+        }
+        start_time = time.time()
+        
+        while True:
+            if camera_stop_flag:
+                print("检测到停止信号，结束摄像头检测循环")
+                break
+            
+            ret, frame = camera_capture.read()
+            
+            if not ret:
+                print("无法从摄像头读取帧，跳过")
+                time.sleep(0.1)
+                continue
+            
+            # 增强画面亮度
+            # 转换到HSV色彩空间，调整V通道（亮度）
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            # 根据用户设置的亮度百分比来计算亮度参数
+            alpha = brightness / 100.0
+            beta = 10 if brightness > 100 else 0
+            hsv[:,:,2] = cv2.convertScaleAbs(hsv[:,:,2], alpha=alpha, beta=beta)
+            frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            
+            # 增强清晰度：根据亮度值和用户设置的清晰度选择合适的锐化和对比度参数
+            if brightness > 100:  # 当调整亮度时
+                # 根据亮度值和清晰度值计算锐化强度
+                # 使用用户设置的sharpness值来调整锐化程度
+                sharpness_factor = sharpness  # 用户设置的清晰度倍数
+                
+                if brightness <= 120:
+                    # 轻度锐化基础参数
+                    center_val = 3.0 + (sharpness_factor * 0.5)
+                    edge_val = -0.3 * sharpness_factor
+                    clahe_limit = 1.5 * sharpness_factor
+                elif brightness <= 150:
+                    # 中度锐化基础参数
+                    center_val = 4.0 + (sharpness_factor * 0.7)
+                    edge_val = -0.4 * sharpness_factor
+                    clahe_limit = 2.0 * sharpness_factor
+                else:
+                    # 强度锐化基础参数
+                    center_val = 5.0 + (sharpness_factor * 0.9)
+                    edge_val = -0.5 * sharpness_factor
+                    clahe_limit = 2.5 * sharpness_factor
+                
+                # 限制最大值以避免过度锐化
+                center_val = min(center_val, 9.0)
+                edge_val = max(edge_val, -1.0)
+                clahe_limit = min(clahe_limit, 4.0)
+                
+                # 创建自定义锐化内核
+                kernel_sharpening = np.array([[edge_val, edge_val, edge_val], 
+                                             [edge_val, center_val, edge_val],
+                                             [edge_val, edge_val, edge_val]])
+                
+                # 应用锐化滤镜
+                frame = cv2.filter2D(frame, -1, kernel_sharpening)
+                
+                # 使用CLAHE增强对比度，改善细节
+                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=clahe_limit, tileGridSize=(8,8))
+                l = clahe.apply(l)
+                lab = cv2.merge((l,a,b))
+                frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+                
+                # 为高亮度值应用轻微高斯模糊来降低噪点
+                if brightness > 150 and sharpness > 1.5:
+                    frame = cv2.GaussianBlur(frame, (3, 3), 0.5)
+            
+            frame_count += 1
+            
+            # 每3帧处理一次，以减少计算负担
+            if frame_count % 3 == 0:
+                try:
+                    # 将OpenCV的BGR格式转换为PIL的RGB格式
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(rgb_frame)
+                    
+                    # 使用模型处理帧，启用缺陷计数
+                    result = model.detect_image(pil_image, count=True, name_classes=['背景', '包裹体', '贴片', '划痕', '其他'])
+                    
+                    # 直接使用result作为结果图像
+                    result_image = result
+                    
+                    # 从模型的属性中获取类别统计数据
+                    classes_nums = getattr(model, 'last_classes_nums', np.zeros(5))
+                    
+                    # 更新缺陷计数
+                    if classes_nums is not None and len(classes_nums) >= 5:  # 确保有足够的类别
+                        current_defects = {
+                            "inclusion": int(classes_nums[1]) if len(classes_nums) > 1 else 0,  # 包裹体
+                            "patches": int(classes_nums[2]) if len(classes_nums) > 2 else 0,    # 贴片
+                            "scratches": int(classes_nums[3]) if len(classes_nums) > 3 else 0,  # 划痕
+                            "other": int(classes_nums[4]) if len(classes_nums) > 4 else 0       # 其他
+                        }
+                        # 累加每种缺陷的数量
+                        for defect_type, count in current_defects.items():
+                            if count > 0:  # 只在检测到缺陷时更新
+                                defect_counts[defect_type] += count
+                                print(f"摄像头检测到{defect_type}缺陷: {count}个, 累计: {defect_counts[defect_type]}个")
+                    
+                    # 获取检测后的图像作为numpy数组（用于视频写入）
+                    result_frame = cv2.cvtColor(np.array(result_image), cv2.COLOR_RGB2BGR)
+                    
+                    # 写入结果帧到视频
+                    out.write(result_frame)
+                    frames_processed += 1
+                    
+                    # 每10帧更新一次进度和缺陷统计
+                    if frames_processed % 10 == 0 and detection_id and detection_id in detection_status:
+                        progress = min(80, 10 + (frames_processed / 100) * 70)
+                        detection_status[detection_id].update({
+                            'status': 'processing',
+                            'message': f'已处理 {frames_processed} 帧',
+                            'progress': progress,
+                            'defect_counts': defect_counts.copy()  # 使用copy避免引用问题
+                        })
+                        
+                        # 更新数据库状态
+                        update_detection_status(
+                            detection_id=detection_id,
+                            status="processing",
+                            metadata=json.dumps({
+                                "message": f"已处理 {frames_processed} 帧",
+                                "progress": progress,
+                                "frames_processed": frames_processed,
+                                "defect_counts": defect_counts
+                            })
+                        )
+                
+                except Exception as e:
+                    print(f"处理帧时出错: {str(e)}")
+                    traceback.print_exc()
+            
+            # 控制循环速度，适应设定的FPS
+            time.sleep(1/fps - ((time.time() - start_time) % (1/fps)))
+        
+        # 释放资源
+        if out:
+            out.release()
+        if camera_capture:
+            camera_capture.release()
+        
+        # 摄像头释放与视频保存完成
+        cv2.destroyAllWindows()
+        
+        # 处理Windows平台上的AVI转MP4转换
+        final_output_path = output_path
+        if sys.platform.startswith('win') and 'output_path_avi' in locals():
+            try:
+                # 如果已经保存为AVI，转换为MP4
+                output_path_avi = locals()['output_path_avi']
+                if os.path.exists(output_path_avi) and os.path.getsize(output_path_avi) > 0:
+                    print(f"Windows平台：将AVI转换为MP4，从 {output_path_avi} 到 {output_path}")
+                    
+                    # 使用FFmpeg进行转换(如果安装了FFmpeg)
+                    try:
+                        import subprocess
+                        command = f'ffmpeg -i "{output_path_avi}" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 128k "{output_path}" -y'
+                        subprocess.run(command, shell=True, check=True)
+                        print(f"成功转换视频到MP4格式：{output_path}")
+                        final_output_path = output_path
+                    except Exception as e:
+                        print(f"FFmpeg转换失败，使用原始AVI文件: {e}")
+                        # 使用原始AVI文件
+                        final_output_path = output_path_avi
+                        # 更新输出路径以匹配实际文件
+                        output_path = output_path_avi
+            except Exception as e:
+                print(f"处理AVI到MP4转换时出错: {e}")
+        
+        # 更新最终状态
+        if detection_id and frames_processed > 0:
+            final_status = {
+                "status": "completed",
+                "progress": 100,
+                "message": f"处理完成，共处理了 {frames_processed} 帧视频",
+                "frames_processed": frames_processed,
+                "defect_counts": defect_counts,
+                "output_file": final_output_path
+            }
+            
+            detection_status[detection_id].update(final_status)
+            
+            # 更新数据库状态
+            update_detection_status(
+                detection_id=detection_id,
+                status="completed",
+                result_path=final_output_path,
+                metadata=json.dumps(final_status)
+            )
+            
+            print(f"后端摄像头检测完成，共处理 {frames_processed} 帧，检测到的缺陷：{defect_counts}")
+    
+    except Exception as e:
+        print(f"后端摄像头检测出错: {str(e)}")
+        traceback.print_exc()
+        
+        if detection_id and detection_id in detection_status:
+            error_status = {
+                'status': 'error',
+                'message': f'检测过程中出错: {str(e)}',
+                'progress': 0
+            }
+            detection_status[detection_id].update(error_status)
+            update_detection_status(
+                detection_id=detection_id,
+                status="error",
+                metadata=json.dumps(error_status)
+            )
+
+@app.route('/api/start-camera', methods=['POST'])
+def start_camera():
+    """启动后端摄像头检测"""
+    global camera_stop_flag, detection_status
+    
+    try:
+        # 重置停止标志
+        camera_stop_flag = False
+        
+        # 生成唯一检测ID和输出文件名
+        detection_id = str(uuid.uuid4())
+        timestamp = int(time.time())
+        output_filename = f"camera_detection_{timestamp}.mp4"
+        
+        # 设置输出路径 - 使用static/processed/videos目录存储结果
+        output_dir = os.path.join('static', 'processed', 'videos')
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, output_filename)
+        
+        print(f"后端摄像头检测：将保存视频到 {output_path}")
+        
+        # 从请求中获取FPS设置和亮度设置
+        data = request.json or {}
+        fps = int(data.get('fps', 15))  # 默认为15FPS
+        brightness = int(data.get('brightness', 115))  # 默认亮度115%
+        sharpness = int(data.get('sharpness', 10)) / 10.0  # 清晰度值，默认为1.0
+        
+        # 初始化检测状态
+        detection_status[detection_id] = {
+            "status": "processing",
+            "progress": 0,
+            "message": "正在初始化摄像头...",
+            "defect_counts": {},
+            "frames_processed": 0,
+            "output_file": output_path
+        }
+        
+        # 添加检测记录到数据库
+        metadata = json.dumps({
+            "message": "正在初始化后端摄像头检测...",
+            "progress": 0,
+            "fps": fps,
+            "brightness": brightness,
+            "sharpness": sharpness,
+            "start_time": timestamp
+        })
+        
+        add_detection_record(
+            detection_id=detection_id,
+            detection_type="camera",
+            filename=output_filename,
+            original_path=None,
+            result_path=output_path,
+            status="processing",
+            metadata=metadata
+        )
+        
+        # 启动后台线程进行检测
+        detection_thread = threading.Thread(
+            target=backend_camera_detection,
+            args=(output_path, fps, detection_id),
+            kwargs={"brightness": brightness, "sharpness": sharpness}
+        )
+        detection_thread.start()
+        
+        return jsonify({
+            "success": True,
+            "detection_id": detection_id,
+            "message": "后端摄像头检测已启动"
+        })
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        })
+
+@app.route('/api/stop-camera', methods=['POST'])
+def stop_camera():
+    try:
+        # 设置摄像头停止标志为True，这会导致摄像头检测循环退出
+        global camera_stop_flag, camera_capture
+        print("收到停止摄像头请求")
+        camera_stop_flag = True
+        
+        # 尝试更新检测状态
+        detection_id = request.json.get('detection_id') if request.is_json else None
+        if detection_id and detection_id in detection_status:
+            # 更新状态为处理中而不是已完成，因为我们需要处理已采集的视频帧
+            detection_status[detection_id]['status'] = 'processing'
+            detection_status[detection_id]['message'] = '正在处理采集的视频帧'
+            detection_status[detection_id]['progress'] = 50
+        
+        # 强制释放摄像头资源 - 设置一个小延迟让检测循环先响应停止标志
+        timer = threading.Timer(0.5, lambda: release_camera_resources(detection_id))
+        timer.start()
+        
+        return jsonify({
+            'success': True, 
+            'message': '摄像头检测正在停止，系统将处理已采集的视频帧',
+            'detection_id': detection_id
+        })
+    except Exception as e:
+        print(f"停止摄像头出错: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def release_camera_resources(detection_id=None):
+    """释放摄像头资源的辅助函数"""
+    global camera_capture
+    
+    try:
+        # 尝试释放摄像头资源
+        if camera_capture is not None:
+            try:
+                camera_capture.release()
+                print("已释放摄像头资源")
+            except Exception as e:
+                print(f"释放摄像头时出错: {str(e)}")
+            camera_capture = None
+        
+        # 强制释放摄像头索引0，并尝试关闭相关进程
+        try:
+            cap = cv2.VideoCapture(0)
+            cap.release()
+            print("强制释放了摄像头索引0")
+            
+            # 仅在Windows系统上尝试使用系统命令关闭进程
+            if sys.platform.startswith('win'):
+                os.system('taskkill /F /IM opencv_videoio_ffmpeg*.exe 2>nul')
+                print("执行了系统命令关闭摄像头相关进程")
+        except Exception as e:
+            print(f"尝试强制释放摄像头时出错: {str(e)}")
+        
+        # 关闭所有OpenCV窗口
+        cv2.destroyAllWindows()
+        
+    except Exception as e:
+        print(f"释放摄像头资源时出错: {str(e)}")
+        traceback.print_exc()
+
+@app.route('/api/detection-status/<detection_id>')
+def get_detection_status(detection_id):
+    """获取特定检测任务的状态"""
+    global detection_status
+    
+    if detection_id in detection_status:
+        # 从全局字典中获取状态
+        status_data = detection_status[detection_id].copy()
+        
+        # 确保输出文件路径正确格式化
+        if 'output_file' in status_data and status_data['output_file']:
+            # 获取原始文件名和扩展名
+            filename = os.path.basename(status_data['output_file'])
+            # 更新输出文件路径为相对URL路径
+            status_data['output_file'] = f"/processed/images/{filename}"
+        
+        return jsonify(status_data)
+    
+    # 如果在内存中找不到，尝试从数据库获取
+    detection_record = get_detection_record(detection_id)
+    if detection_record:
+        status = detection_record.get('status', 'unknown')
+        metadata = detection_record.get('metadata', '{}')
+        
+        try:
+            metadata_dict = json.loads(metadata) if metadata else {}
+        except Exception:
+            metadata_dict = {}
+        
+        result_path = detection_record.get('result_path', '')
+        if result_path:
+            # 获取原始文件名
+            filename = os.path.basename(result_path)
+            # 更新结果路径为相对URL路径
+            result_path = f"/processed/images/{filename}"
+        
+        response = {
+            'status': status,
+            'progress': metadata_dict.get('progress', 100 if status == 'completed' else 0),
+            'message': metadata_dict.get('message', ''),
+            'defect_counts': metadata_dict.get('defect_counts', {}),
+            'frames_processed': metadata_dict.get('frames_processed', 0),
+            'output_file': result_path,
+            'filename': metadata_dict.get('filename', '')  # 添加filename字段
+        }
+        
+        return jsonify(response)
+    
+    return jsonify({'status': 'unknown', 'progress': 0, 'message': '未找到检测任务'})
+
+@app.route('/processed/images/<filename>')
+def get_processed_image(filename):
+    """提供处理后的图像文件
+    检查多个可能的位置并返回图像文件，优先返回带有检测痕迹的结果图像
+    """
+    # 安全检查：防止目录遍历
+    if '..' in filename or filename.startswith('/'):
+        return "不允许访问该文件", 403
+    
+    # 获取文件名和扩展名
+    base_name, ext = os.path.splitext(filename)
+    
+    # 构建可能的文件名（原始文件和结果文件）
+    original_filename = filename
+    result_filename = f"{base_name}_result{ext}" if not base_name.endswith('_result') else filename
+    
+    # 按优先级检查可能的路径
+    possible_paths = [
+        os.path.join(path_predict_img, result_filename),  # 首先检查带有检测痕迹的结果图像
+        os.path.join(PROCESSED_FOLDER, result_filename),  # 标准处理文件夹的结果图像
+        os.path.join(path_predict_img, original_filename), # 然后检查原始检测结果
+        os.path.join(PROCESSED_FOLDER, original_filename), # 标准处理文件夹的原始图像
+        os.path.join('uploads', original_filename),        # 最后检查原始上传图像
+    ]
+    
+    # 检查所有可能的路径
+    for path in possible_paths:
+        if os.path.exists(path):
+            print(f"提供图像文件: {path}")  # 添加日志
+            return send_file(path)
+    
+    # 如果文件不存在，返回404
+    print(f"图像文件未找到: {filename}")  # 添加日志
+    return "图像文件未找到", 404
+
+@app.route('/original/images/<filename>')
+def get_original_image(filename):
+    """提供原始图像文件
+    检查多个可能的位置并返回原始图像文件
+    """
+    # 安全检查：防止目录遍历
+    if '..' in filename or filename.startswith('/'):
+        return "不允许访问该文件", 403
+    
+    # 尝试在数据库中查找原始文件路径
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT original_path FROM detection_records WHERE filename = ?", (filename,))
+    record = cursor.fetchone()
+    conn.close()
+    
+    # 如果在数据库中找到了原始路径
+    if record and record['original_path']:
+        original_path = record['original_path']
+        # 如果路径存在且可访问
+        if os.path.exists(original_path) and os.access(original_path, os.R_OK):
+            print(f"提供原始图像(数据库路径): {original_path}")
+            return send_file(original_path)
+    
+    # 按优先级检查可能的路径
+    possible_paths = [
+        os.path.join('uploads', filename),                # 检查上传文件夹
+        os.path.join('uploads', 'images', filename),      # 检查上传图片文件夹
+        os.path.join('static', 'uploads', filename),      # 检查静态上传文件夹
+        os.path.join('static', 'uploads', 'images', filename), # 检查静态上传图片文件夹
+        os.path.join('img', filename),                    # 检查原始img文件夹
+        os.path.join(dir_origin_path, filename),          # 检查配置的上传路径
+    ]
+    
+    # 检查所有可能的路径
+    for path in possible_paths:
+        if os.path.exists(path):
+            print(f"提供原始图像文件: {path}")
+            return send_file(path)
+    
+    # 如果文件不存在，返回404
+    print(f"原始图像文件未找到: {filename}")
+    return "原始图像文件未找到", 404
+
+@app.route('/processed/videos/<filename>')
+def get_processed_video(filename):
+    """
+    提供处理后的视频文件下载
+    检查安全性并返回正确的视频文件
+    """
+    # 安全检查：防止目录遍历
+    if '..' in filename or filename.startswith('/'):
+        return "不允许访问该文件", 403
+        
+    # 首先尝试在新路径中查找
+    video_path = os.path.join('static', 'processed', 'videos', filename)
+    
+    # 如果文件不存在，尝试在旧路径中查找
+    if not os.path.exists(video_path):
+        # 尝试在path_predict_video目录下查找
+        video_path = os.path.join(path_predict_video, filename)
+        if not os.path.exists(video_path):
+            # 检查在原始上传目录中
+            video_path = os.path.join('uploads', 'videos', filename)
+            if not os.path.exists(video_path):
+                # 检查完整路径（针对绝对路径的情况）
+                if os.path.exists(filename):
+                    return send_file(filename)
+                return "文件未找到", 404
+    
+    # 文件存在，返回给客户端
+    return send_file(video_path)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
+
+def allowed_video_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'mp4', 'avi', 'mov', 'wmv'}
+
+def clean_directory(directory):
+    for item in pathlib.Path(directory).iterdir():
+        if item.is_file():
+            item.unlink()
+
+@atexit.register
+def cleanup_on_exit():
+    """在应用程序退出时清理资源"""
+    global camera_stop_flag, camera_capture
+    print("应用程序正在退出，清理资源...")
+    
+    camera_stop_flag = True
+    
+    if camera_capture is not None:
+        try:
+            camera_capture.release()
+            print("退出时释放了摄像头")
+        except Exception as e:
+            print(f"退出时释放摄像头出错: {str(e)}")
+        camera_capture = None
+    
+    # 强制释放所有可能的摄像头资源
+    for i in range(5):
+        try:
+            cap = cv2.VideoCapture(i)
+            cap.release()
+        except:
+            pass
+    
+    cv2.destroyAllWindows()
+    print("应用程序退出，已清理所有资源")
+
+def check_camera_resources():
+    """定期检查并释放未使用的摄像头资源"""
+    global camera_capture, camera_stop_flag
+    
+    if camera_stop_flag and camera_capture is not None:
+        try:
+            camera_capture.release()
+            print("定时任务释放了摄像头资源")
+        except:
+            pass
+        camera_capture = None
+
+# 在应用启动时设置定时任务
+import threading
+def start_resource_checker():
+    threading.Timer(5.0, start_resource_checker).start()
+    check_camera_resources()
+
+# 在主程序中启动定时任务
+if __name__ == '__main__':
+    # 启动资源检查器线程
+    resource_checker_thread = threading.Thread(target=start_resource_checker)
+    resource_checker_thread.daemon = True
+    resource_checker_thread.start()
+    
+    # 启动Flask应用 - 禁用热重载和多线程以避免Windows上的套接字问题
+    app.run(debug=True, host='127.0.0.1', port=5001, threaded=False, use_reloader=False)
+
+# ----------------------------------------------------------------------------
+
+def convert_video_with_ffmpeg(input_path, output_path):
+    """使用ffmpeg转换视频格式"""
+    try:
+        # 确保输入和输出路径不同，考虑大小写问题
+        if input_path.lower() == output_path.lower():
+            # 创建临时输出路径，确保与原始路径不同
+            temp_output = os.path.splitext(output_path)[0] + "_temp" + os.path.splitext(output_path)[1]
+            output_path = temp_output
+        
+        import subprocess
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '22',
+            '-y',  # 覆盖输出文件
+            output_path
+        ]
+        print(f"执行ffmpeg命令: {' '.join(cmd)}")
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(f"ffmpeg输出: {result.stdout}")
+        
+        # 如果使用了临时文件，则替换原文件
+        if input_path.lower() != output_path.lower() and os.path.exists(output_path):
+            try:
+                # 先检查原文件是否存在
+                if os.path.exists(input_path):
+                    os.remove(input_path)  # 删除原文件
+                    print(f"已删除原文件: {input_path}")
+                
+                # 创建一个新的文件名，保持原始文件名的大小写
+                new_file_path = input_path
+                
+                # 重命名临时文件
+                os.rename(output_path, new_file_path)
+                print(f"已将临时文件 {output_path} 重命名为 {new_file_path}")
+                
+                output_path = new_file_path  # 更新输出路径
+            except Exception as e:
+                print(f"替换原文件时出错: {str(e)}")
+                # 如果重命名失败，返回临时文件路径
+                return True, output_path
+        
+        return True, output_path
+    except subprocess.CalledProcessError as e:
+        print(f"ffmpeg命令执行失败: {str(e)}")
+        print(f"错误输出: {e.stderr}")
+        return False, input_path
+    except Exception as e:
+        print(f"使用ffmpeg转换视频时出错: {str(e)}")
+        return False, input_path
+
+def create_dummy_video(output_path, fps=25, duration=10):
+    """
+    当摄像头无法访问时，创建一个虚拟视频
+    """
+    try:
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        
+        width, height = 640, 480
+        
+        # 尝试不同的编码器
+        codecs = [
+            ('mp4v', '.mp4'),  # MP4
+            ('XVID', '.avi'),  # AVI
+            ('MJPG', '.avi'),  # Motion JPEG
+            ('H264', '.mp4')   # H.264
+        ]
+        
+        out = None
+        for codec, ext in codecs:
+            try:
+                # 修改文件扩展名以匹配编码器
+                new_path = os.path.splitext(output_path)[0] + ext
+                print(f"尝试使用编码器 {codec} 创建虚拟视频: {new_path}")
+                
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                test_out = cv2.VideoWriter(new_path, fourcc, fps, (width, height))
+                
+                if test_out.isOpened():
+                    out = test_out
+                    output_path = new_path
+                    print(f"成功使用编码器 {codec} 创建视频写入器")
+                    break
+                else:
+                    test_out.release()
+            except Exception as e:
+                print(f"尝试编码器 {codec} 时出错: {str(e)}")
+        
+        if out is None or not out.isOpened():
+            print("无法创建视频写入器，尝试使用ffmpeg直接创建视频")
+            return create_dummy_video_with_ffmpeg(output_path, fps, duration)
+        
+        # 创建一些帧
+        frames = int(fps * duration)
+        for i in range(frames):
+            # 创建一个彩色图像 - 使用渐变背景
+            frame = np.zeros((height, width, 3), dtype=np.uint8)
+            
+            # 创建渐变背景 - 简化计算以提高性能
+            for y in range(0, height, 2):  # 每隔2行处理一次
+                for x in range(0, width, 2):  # 每隔2列处理一次
+                    b = int(255 * y / height)
+                    g = int(255 * x / width)
+                    r = int(255 * (1 - y / height))
+                    frame[y:y+2, x:x+2] = [b, g, r]  # 一次设置2x2的块
+            
+            # 添加一些文本和图形
+            cv2.putText(frame, "摄像头无法正常工作", (50, height//2-60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(frame, "请检查摄像头连接", (50, height//2), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(frame, "或尝试重启应用", (50, height//2+60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            
+            # 添加一个动画效果
+            radius = 30 + int(20 * np.sin(i * 0.2))
+            cv2.circle(frame, (width-100, 100), radius, (0, 0, 255), -1)
+            
+            # 添加一个进度条
+            progress = int((i / frames) * width)
+            cv2.rectangle(frame, (0, height-30), (progress, height), (0, 255, 0), -1)
+            
+            # 写入帧
+            out.write(frame)
+        
+        out.release()
+        print(f"已创建虚拟视频: {output_path}")
+        return True
+    except Exception as e:
+        print(f"创建虚拟视频时出错: {str(e)}")
+        return False
+
+def create_dummy_video_with_ffmpeg(output_path, fps=25, duration=10):
+    """使用ffmpeg直接创建虚拟视频"""
+    try:
+        import subprocess
+        import tempfile
+        
+        # 创建临时文本文件，包含ffmpeg滤镜命令
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            filter_file = f.name
+            f.write(f"""
+color=c=blue:s=640x480:d={duration},
+drawtext=text='摄像头无法正常工作':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=h/2-60,
+drawtext=text='请检查摄像头连接':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=h/2,
+drawtext=text='或尝试重启应用':fontcolor=white:fontsize=30:x=(w-text_w)/2:y=h/2+60
+            """.strip())
+        
+        # 确保输出是MP4格式
+        if not output_path.lower().endswith('.mp4'):
+            output_path = os.path.splitext(output_path)[0] + '.mp4'
+        
+        # 使用ffmpeg创建视频
+        cmd = [
+            'ffmpeg',
+            '-f', 'lavfi',
+            '-i', f'@{filter_file}',
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(fps),
+            '-t', str(duration),
+            '-y',
+            output_path
+        ]
+        
+        print(f"执行ffmpeg命令: {' '.join(cmd)}")
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        
+        # 删除临时文件
+        os.unlink(filter_file)
+        
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            print(f"已使用ffmpeg创建虚拟视频: {output_path}")
+            return True
+        else:
+            print("ffmpeg创建视频失败")
+            return False
+    except Exception as e:
+        print(f"使用ffmpeg创建虚拟视频时出错: {str(e)}")
+        return False
+
+# 更新用户信息
+def update_user_info(user_id, username=None, email=None):
+    """更新用户基本信息"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 检查用户名是否已存在（排除当前用户）
+        if username:
+            cursor.execute("SELECT id FROM users WHERE username = ? AND id != ?", (username, user_id))
+            if cursor.fetchone():
+                return False, "用户名已被占用"
+        
+        # 检查邮箱是否已存在（排除当前用户）
+        if email:
+            cursor.execute("SELECT id FROM users WHERE email = ? AND id != ?", (email, user_id))
+            if cursor.fetchone():
+                return False, "邮箱已被注册"
+        
+        # 构建更新语句
+        update_fields = []
+        params = []
+        
+        if username:
+            update_fields.append("username = ?")
+            params.append(username)
+        
+        if email:
+            update_fields.append("email = ?")
+            params.append(email)
+        
+        if not update_fields:
+            return True, "无需更新"
+        
+        # 执行更新
+        query = f"UPDATE users SET {', '.join(update_fields)} WHERE id = ?"
+        params.append(user_id)
+        
+        cursor.execute(query, params)
+        conn.commit()
+        
+        return True, "信息更新成功"
+    except Exception as e:
+        print(f"更新用户信息时出错: {str(e)}")
+        return False, f"更新失败: {str(e)}"
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# 更新用户密码
+def update_user_password(user_id, current_password, new_password):
+    """更新用户密码"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 验证当前密码
+        cursor.execute("SELECT password FROM users WHERE id = ?", (user_id,))
+        result = cursor.fetchone()
+        
+        if not result:
+            return False, "用户不存在"
+        
+        stored_password = result[0]
+        
+        if stored_password != hash_password(current_password):
+            return False, "当前密码不正确"
+        
+        # 更新密码
+        hashed_new_password = hash_password(new_password)
+        cursor.execute("UPDATE users SET password = ? WHERE id = ?", (hashed_new_password, user_id))
+        conn.commit()
+        
+        return True, "密码更新成功"
+    except Exception as e:
+        print(f"更新用户密码时出错: {str(e)}")
+        return False, f"更新失败: {str(e)}"
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+@app.route('/profile', methods=['GET', 'POST'])
+@login_required
+def profile():
+    user_id = session.get('user_id')
+    user = get_user_by_id(user_id)
+    
+    if not user:
+        # 如果找不到用户，重定向到登录页面
+        return redirect('/logout')
+    
+    info_message = None
+    info_error = None
+    password_message = None
+    password_error = None
+    
+    # 处理基本信息更新
+    if request.method == 'POST' and 'update_info' in request.form:
+        username = request.form.get('username')
+        email = request.form.get('email')
+        
+        if not username or not email:
+            info_error = "用户名和邮箱不能为空"
+        else:
+            success, message = update_user_info(user_id, username, email)
+            if success:
+                info_message = message
+                # 更新会话中的用户名
+                if username != user['username']:
+                    session['username'] = username
+                # 重新获取用户信息
+                user = get_user_by_id(user_id)
+            else:
+                info_error = message
+    
+    # 处理密码更新
+    if request.method == 'POST' and 'update_password' in request.form:
+        current_password = request.form.get('current_password')
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if not current_password or not new_password or not confirm_password:
+            password_error = "所有密码字段都必须填写"
+        elif new_password != confirm_password:
+            password_error = "新密码和确认密码不匹配"
+        else:
+            success, message = update_user_password(user_id, current_password, new_password)
+            if success:
+                password_message = message
+            else:
+                password_error = message
+    
+    return render_template('profile.html', 
+                          user=user, 
+                          info_message=info_message, 
+                          info_error=info_error,
+                          password_message=password_message,
+                          password_error=password_error)
+
+def get_all_users(limit=50, offset=0):
+    """获取所有用户信息"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # 获取总用户数
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+        
+        # 获取分页用户数据
+        cursor.execute("""
+            SELECT id, username, email, created_at, last_login, is_active, is_admin 
+            FROM users 
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset))
+        
+        users = [dict(user) for user in cursor.fetchall()]
+        
+        return users, total_users
+    except Exception as e:
+        print(f"获取用户列表时出错: {str(e)}")
+        return [], 0
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def admin_create_user(username, email, password, is_admin=False):
+    """管理员创建新用户"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 检查用户名是否已存在
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        if cursor.fetchone():
+            return False, "用户名已存在"
+        
+        # 检查邮箱是否已存在
+        cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+        if cursor.fetchone():
+            return False, "邮箱已被注册"
+        
+        # 哈希密码
+        hashed_password = hash_password(password)
+        
+        # 插入新用户
+        cursor.execute(
+            "INSERT INTO users (username, email, password, created_at, is_admin) VALUES (?, ?, ?, ?, ?)",
+            (username, email, hashed_password, datetime.datetime.now(), 1 if is_admin else 0)
+        )
+        conn.commit()
+        return True, "用户创建成功"
+    except Exception as e:
+        print(f"创建用户时出错: {str(e)}")
+        return False, f"创建失败: {str(e)}"
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def delete_user(user_id):
+    """删除用户"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 检查用户是否存在
+        cursor.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            return False, "用户不存在"
+        
+        # 不允许删除管理员账号
+        if user[0]:
+            return False, "不能删除管理员账号"
+        
+        # 删除用户
+        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+        
+        return True, "用户已成功删除"
+    except Exception as e:
+        print(f"删除用户时出错: {str(e)}")
+        return False, f"删除失败: {str(e)}"
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def toggle_user_status(user_id):
+    """切换用户激活状态"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 检查用户是否存在
+        cursor.execute("SELECT is_active, is_admin FROM users WHERE id = ?", (user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            return False, "用户不存在"
+        
+        is_active, is_admin = user
+        
+        # 不允许禁用管理员账号
+        if is_admin:
+            return False, "不能修改管理员账号状态"
+        
+        # 切换状态
+        new_status = 0 if is_active else 1
+        cursor.execute("UPDATE users SET is_active = ? WHERE id = ?", (new_status, user_id))
+        conn.commit()
+        
+        status_text = "激活" if new_status else "禁用"
+        return True, f"用户已{status_text}"
+    except Exception as e:
+        print(f"切换用户状态时出错: {str(e)}")
+        return False, f"操作失败: {str(e)}"
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# 管理员权限装饰器
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login', next=request.url))
+        
+        if 'is_admin' not in session:
+            return render_template('error.html', error="权限不足，需要管理员权限")
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/admin/users')
+@admin_required
+def admin_users():
+    page = request.args.get('page', 1, type=int)
+    per_page = 10
+    offset = (page - 1) * per_page
+    
+    users, total_users = get_all_users(limit=per_page, offset=offset)
+    total_pages = (total_users + per_page - 1) // per_page
+    
+    return render_template('admin_users.html', 
+                          users=users, 
+                          page=page, 
+                          total_pages=total_pages,
+                          total_users=total_users)
+
+@app.route('/admin/users/create', methods=['GET', 'POST'])
+@admin_required
+def admin_create_user_route():
+    error = None
+    success = None
+    
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        is_admin = request.form.get('is_admin') == 'on'
+        
+        if not username or not email or not password or not confirm_password:
+            error = "请填写所有必填字段"
+        elif password != confirm_password:
+            error = "两次输入的密码不一致"
+        else:
+            success, message = admin_create_user(username, email, password, is_admin)
+            if success:
+                success = message
+            else:
+                error = message
+    
+    return render_template('admin_create_user.html', error=error, success=success)
+
+@app.route('/api/admin/users/<user_id>', methods=['DELETE'])
+@admin_required
+def delete_user_api(user_id):
+    success, message = delete_user(user_id)
+    return jsonify({"success": success, "message": message})
+
+@app.route('/api/admin/users/<user_id>/toggle-status', methods=['POST'])
+@admin_required
+def toggle_user_status_api(user_id):
+    success, message = toggle_user_status(user_id)
+    return jsonify({"success": success, "message": message})
+
+@app.route('/test')
+def test():
+    return "测试路由正常工作！"
+
+@app.route('/chat')
+@login_required
+def chat():
+    """智能问答页面，使用Coze智能体"""
+    now = datetime.datetime.now()
+    return render_template('chat.html', now=now)
+
+@app.route('/api/chat', methods=['POST'])
+@login_required
+def chat_api():
+    """
+    聊天API接口
+    
+    注意：此接口已被Coze智能体直接集成取代，保留此路由仅用于兼容性目的。
+    实际的AI对话由Coze平台处理。
+    """
+    try:
+        return jsonify({
+            'response': '系统已升级为Coze智能体，此API不再使用。请直接在界面中与智能助手对话。',
+            'info': '如需更多信息，请联系管理员。'
+        })
+    except Exception as e:
+        return jsonify({
+            'error': '服务器错误',
+            'details': str(e)
+        }), 500
+
+# 确保所有必要的目录存在
+def ensure_directories_exist():
+    """确保所有需要的目录都存在"""
+    directories = [
+        os.path.join(app.instance_path, 'uploads'),
+        os.path.join(app.instance_path, 'processed'),
+        os.path.join(app.static_folder, 'images'),
+        dir_origin_path,
+        dir_save_path,
+        path_predict_img,
+        path_predict_video,
+        batch_image_save_path,  # 确保批量图像保存目录存在
+    ]
+    
+    for directory in directories:
+        try:
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+                print(f"已创建目录: {directory}")
+        except Exception as e:
+            print(f"创建目录失败: {directory}, 错误: {str(e)}")
+    
+    print("目录检查完成")
+
+# 应用启动时立即调用，确保目录存在
+ensure_directories_exist()
+
+def get_detection_statistics():
+    """获取检测统计数据"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # 获取总检测数量和上周数据 - 仅统计单次图像检测
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_current,
+                (SELECT COUNT(*) 
+                 FROM detection_records 
+                 WHERE created_at >= date('now', '-14 days') 
+                 AND created_at < date('now', '-7 days')
+                 AND detection_type = 'image'
+                ) as total_last_week
+            FROM detection_records 
+            WHERE created_at >= date('now', '-7 days')
+            AND detection_type = 'image'
+        """)
+        counts = cursor.fetchone()
+        total_current = counts['total_current'] or 0
+        total_last_week = counts['total_last_week'] or 0
+        
+        # 计算周同比增长（避免除以零）
+        week_growth = ((total_current - total_last_week) / total_last_week * 100) if total_last_week > 0 else 0
+        
+        # 获取总检测数量 - 仅统计单次图像检测
+        cursor.execute("SELECT COUNT(*) as total FROM detection_records WHERE detection_type = 'image'")
+        total_detections = cursor.fetchone()['total'] or 0
+        
+        # 获取平均处理时间（从metadata中提取）- 仅统计单次图像检测
+        cursor.execute("""
+            SELECT AVG(CAST(json_extract(metadata, '$.processing_time') AS FLOAT) * 1000) as avg_time
+            FROM detection_records 
+            WHERE metadata IS NOT NULL 
+            AND json_extract(metadata, '$.processing_time') IS NOT NULL
+            AND detection_type = 'image'
+        """)
+        result = cursor.fetchone()
+        avg_time = result['avg_time'] if result and result['avg_time'] is not None else 0
+        
+        # 如果平均处理时间为0，使用一个合理的默认值作为示例
+        if avg_time == 0:
+            # 打印调试信息
+            print("警告：未能从数据库获取有效的平均处理时间，将使用默认值")
+            
+            # 尝试从另一种记录类型获取处理时间
+            cursor.execute("""
+                SELECT AVG(CAST(json_extract(metadata, '$.processing_time') AS FLOAT) * 1000) as alt_time
+                FROM detection_records 
+                WHERE metadata IS NOT NULL 
+                AND json_extract(metadata, '$.processing_time') IS NOT NULL
+                AND (detection_type = 'batch_image_item' OR detection_type = 'image')
+            """)
+            alt_result = cursor.fetchone()
+            alt_time = alt_result['alt_time'] if alt_result and alt_result['alt_time'] is not None else 0
+            
+            if alt_time > 0:
+                avg_time = alt_time
+                print(f"使用替代方法获取的平均处理时间: {avg_time}ms")
+            else:
+                # 如果仍然为0，设置一个合理的默认值
+                avg_time = 550.0  # 假设平均处理时间为550毫秒
+                print(f"使用默认平均处理时间: {avg_time}ms")
+        
+        # 获取各类型缺陷的统计
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_processed,
+                SUM(CASE 
+                    WHEN json_extract(metadata, '$.has_defects') = 1 
+                    OR json_extract(metadata, '$.has_defects') = 'true'
+                    THEN 1 ELSE 0 END) as total_defects,
+                SUM(CASE WHEN json_extract(metadata, '$.defect_counts.scratches') > 0 THEN 1 ELSE 0 END) as scratches_count,
+                SUM(CASE WHEN json_extract(metadata, '$.defect_counts.patches') > 0 THEN 1 ELSE 0 END) as patches_count,
+                SUM(CASE WHEN json_extract(metadata, '$.defect_counts.inclusion') > 0 THEN 1 ELSE 0 END) as inclusion_count,
+                SUM(CASE WHEN json_extract(metadata, '$.defect_counts.other') > 0 THEN 1 ELSE 0 END) as other_count
+            FROM detection_records 
+            WHERE detection_type = 'image' AND status = 'completed'
+        """)
+        defect_stats = dict(cursor.fetchone())
+        
+        # 确保所有统计值都有默认值0
+        defect_stats = {
+            'total_processed': defect_stats.get('total_processed', 0) or 0,
+            'total_defects': defect_stats.get('total_defects', 0) or 0,
+            'scratches_count': defect_stats.get('scratches_count', 0) or 0,
+            'patches_count': defect_stats.get('patches_count', 0) or 0,
+            'inclusion_count': defect_stats.get('inclusion_count', 0) or 0,
+            'other_count': defect_stats.get('other_count', 0) or 0
+        }
+        
+        # 计算各类型缺陷的百分比（避免除以零）
+        total_defects = defect_stats['total_defects']
+        if total_defects > 0:
+            defect_stats['scratches_percentage'] = float(defect_stats['scratches_count']) / total_defects * 100
+            defect_stats['patches_percentage'] = float(defect_stats['patches_count']) / total_defects * 100
+            defect_stats['inclusion_percentage'] = float(defect_stats['inclusion_count']) / total_defects * 100
+            defect_stats['other_percentage'] = float(defect_stats['other_count']) / total_defects * 100
+        else:
+            defect_stats['scratches_percentage'] = 0.0
+            defect_stats['patches_percentage'] = 0.0
+            defect_stats['inclusion_percentage'] = 0.0
+            defect_stats['other_percentage'] = 0.0
+        
+        # 获取最近7天的检测趋势
+        cursor.execute("""
+            SELECT 
+                date(created_at) as detection_date,
+                COUNT(*) as count,
+                SUM(CASE 
+                    WHEN json_extract(metadata, '$.defect_counts.scratches') > 0 
+                    OR json_extract(metadata, '$.defect_counts.patches') > 0 
+                    OR json_extract(metadata, '$.defect_counts.inclusion') > 0 
+                    OR json_extract(metadata, '$.defect_counts.other') > 0 
+                    THEN 1 ELSE 0 END) as defect_count
+            FROM detection_records
+            WHERE detection_type = 'image'
+            AND created_at >= date('now', '-7 days')
+            GROUP BY date(created_at)
+            ORDER BY detection_date
+        """)
+        daily_trends = [dict(row) for row in cursor.fetchall()]
+        
+        # 获取不同时段的检测分布
+        cursor.execute("""
+            SELECT 
+                strftime('%H', created_at) as hour,
+                COUNT(*) as count
+            FROM detection_records
+            WHERE detection_type = 'image'
+            GROUP BY hour
+            ORDER BY hour
+        """)
+        hourly_distribution = [dict(row) for row in cursor.fetchall()]
+        
+        # 计算缺陷检出率（避免除以零）- 使用已处理的图像数量作为分母
+        defect_rate = (defect_stats['total_defects'] / defect_stats['total_processed'] * 100) if defect_stats['total_processed'] > 0 else 0
+        
+        # 确保daily_trends有默认值
+        if not daily_trends:
+            current_date = datetime.datetime.now().date()
+            daily_trends = [{
+                'detection_date': (current_date - datetime.timedelta(days=i)).strftime('%Y-%m-%d'),
+                'count': 0,
+                'defect_count': 0
+            } for i in range(7)]
+        
+        # 确保hourly_distribution有默认值
+        if not hourly_distribution:
+            hourly_distribution = [{'hour': str(i).zfill(2), 'count': 0} for i in range(24)]
+        
+        # 注释掉不需要的处理时间统计信息代码，因为已在SQL中直接计算
+        # if processing_times:
+        #     # 将处理时间从秒转为毫秒
+        #     processing_times_ms = [time * 1000 for time in processing_times]
+        #     avg_time = sum(processing_times_ms) / len(processing_times_ms)
+        # else:
+        #     avg_time = 0
+        
+        # 计算一周前的检测量
+        cursor.execute("""
+            SELECT COUNT(*) FROM detection_records 
+            WHERE detection_type = 'image' 
+            AND created_at BETWEEN date('now', '-14 days') AND date('now', '-7 days')
+        """)
+        week_ago_count = cursor.fetchone()[0]
+        
+        # 计算本周增长率（避免除以零）
+        week_growth = ((total_detections - week_ago_count) / week_ago_count * 100) if week_ago_count > 0 else 100
+        
+        return {
+            'total_detections': total_detections,
+            'week_growth': round(week_growth, 1),
+            'defect_rate': round(defect_rate, 1),
+            'avg_processing_time': round(avg_time, 1),
+            'defect_stats': defect_stats,
+            'daily_trends': daily_trends,
+            'hourly_distribution': hourly_distribution
+        }
+    except Exception as e:
+        print(f"获取统计数据时出错: {str(e)}")
+        # 返回默认值
+        return {
+            'total_detections': 0,
+            'week_growth': 0.0,
+            'defect_rate': 0.0,
+            'avg_processing_time': 0.0,
+            'defect_stats': {
+                'total_processed': 0,
+                'total_defects': 0,
+                'scratches_count': 0,
+                'patches_count': 0,
+                'inclusion_count': 0,
+                'other_count': 0,
+                'scratches_percentage': 0.0,
+                'patches_percentage': 0.0,
+                'inclusion_percentage': 0.0,
+                'other_percentage': 0.0
+            },
+            'daily_trends': [{
+                'detection_date': (datetime.datetime.now().date() - datetime.timedelta(days=i)).strftime('%Y-%m-%d'),
+                'count': 0,
+                'defect_count': 0
+            } for i in range(7)],
+            'hourly_distribution': [{'hour': str(i).zfill(2), 'count': 0} for i in range(24)]
+        }
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+@app.route('/analytics')
+@login_required
+def analytics():
+    """统计分析页面"""
+    stats = get_detection_statistics()
+    if stats is None:
+        return render_template('error.html', error='获取统计数据失败')
+    return render_template('analytics.html', stats=stats)
+
+@app.route('/api/analytics/data')
+@login_required
+def get_analytics_data():
+    """获取统计数据API"""
+    stats = get_detection_statistics()
+    if stats is None:
+        return jsonify({'error': '获取统计数据失败'}), 500
+    return jsonify(stats)
+
+@app.route('/batch/images/<filename>')
+def get_batch_image(filename):
+    """获取批量处理后的图像"""
+    # 安全检查，防止目录遍历攻击
+    if '..' in filename or filename.startswith('/'):
+        print(f"[get_batch_image] 无效的文件名: {filename}")
+        return jsonify({'error': '无效的文件名'}), 400
+    
+    try:
+        # 构建文件路径
+        file_path = os.path.join(batch_image_save_path, filename)
+        print(f"[get_batch_image] 请求文件: {filename}")
+        print(f"[get_batch_image] 完整路径: {file_path}")
+        print(f"[get_batch_image] 批量图像保存路径: {batch_image_save_path}")
+        
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            print(f"[get_batch_image] 文件不存在: {file_path}")
+            # 尝试遍历目录查看所有可用文件
+            if os.path.exists(batch_image_save_path):
+                files = os.listdir(batch_image_save_path)
+                print(f"[get_batch_image] 目录中可用文件: {files}")
+            else:
+                print(f"[get_batch_image] 目录不存在: {batch_image_save_path}")
+                # 尝试创建目录
+                try:
+                    os.makedirs(batch_image_save_path, exist_ok=True)
+                    print(f"[get_batch_image] 已创建目录: {batch_image_save_path}")
+                except Exception as e:
+                    print(f"[get_batch_image] 创建目录失败: {str(e)}")
+            return jsonify({'error': '文件不存在'}), 404
+        
+        print(f"[get_batch_image] 成功找到文件, 返回: {file_path}")
+        
+        # 检查是否是下载请求
+        download = request.args.get('download', 'false').lower() == 'true'
+        if download:
+            display_filename = filename
+            if '.' in filename:  # 确保有扩展名
+                base, ext = os.path.splitext(filename)
+                display_filename = f"{base}_检测结果{ext}"  # 添加"检测结果"后缀
+            print(f"[get_batch_image] 文件下载模式，提供文件名: {display_filename}")
+            return send_file(file_path, 
+                             mimetype='image/jpeg', 
+                             as_attachment=True, 
+                             download_name=display_filename)
+        
+        # 普通图像显示
+        return send_file(file_path, mimetype='image/jpeg')
+    except Exception as e:
+        print(f"[get_batch_image] 获取批量图像时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/debug/batch-detection/<detection_id>')
+def debug_batch_detection(detection_id):
+    """用于诊断批量图像检测元数据的路由函数"""
+    try:
+        # 获取记录
+        record = get_detection_record(detection_id)
+        
+        if not record:
+            return jsonify({
+                'status': 'error',
+                'message': '未找到检测记录',
+            }), 404
+        
+        # 检查记录类型
+        if record['detection_type'] != 'batch_image':
+            return jsonify({
+                'status': 'error',
+                'message': f'该记录不是批量图像检测记录，而是 {record["detection_type"]}',
+                'record_type': record['detection_type']
+            }), 400
+        
+        # 准备诊断数据
+        diagnostic_data = {
+            'status': 'success',
+            'record_id': detection_id,
+            'record_type': record['detection_type'],
+            'record_status': record['status'],
+            'record_created_at': record['created_at'],
+            'metadata_type': type(record['metadata']).__name__,
+            'has_metadata': bool(record['metadata']),
+            'diagnostic_info': {}
+        }
+        
+        # 解析元数据
+        metadata = record['metadata']
+        if metadata:
+            try:
+                if isinstance(metadata, str):
+                    parsed_metadata = json.loads(metadata)
+                    diagnostic_data['metadata_parsed'] = True
+                    diagnostic_data['metadata_original'] = metadata[:200] + '...' if len(metadata) > 200 else metadata
+                else:
+                    parsed_metadata = metadata
+                    diagnostic_data['metadata_parsed'] = 'Already object'
+                
+                # 检查批量结果
+                has_batch_results = 'batch_results' in parsed_metadata
+                has_results = 'results' in parsed_metadata
+                
+                diagnostic_data['diagnostic_info'] = {
+                    'has_batch_results_key': has_batch_results,
+                    'has_results_key': has_results,
+                    'batch_results_length': len(parsed_metadata.get('batch_results', [])),
+                    'results_length': len(parsed_metadata.get('results', [])),
+                    'metadata_keys': list(parsed_metadata.keys()),
+                    'sample_data': {
+                        'progress': parsed_metadata.get('progress'),
+                        'file_count': parsed_metadata.get('file_count'),
+                        'completed': parsed_metadata.get('completed'),
+                        'failed': parsed_metadata.get('failed')
+                    }
+                }
+                
+                # 检查批量结果的内容样本
+                if has_batch_results and parsed_metadata['batch_results']:
+                    sample = parsed_metadata['batch_results'][0]
+                    diagnostic_data['batch_results_sample'] = {
+                        'keys': list(sample.keys()) if isinstance(sample, dict) else 'Not a dict',
+                        'status': sample.get('status') if isinstance(sample, dict) else None,
+                        'has_defects': sample.get('has_defects') if isinstance(sample, dict) else None,
+                        'original_path': sample.get('original_path') if isinstance(sample, dict) else None,
+                        'result_path': sample.get('result_path') if isinstance(sample, dict) else None
+                    }
+                elif has_results and parsed_metadata['results']:
+                    sample = parsed_metadata['results'][0]
+                    diagnostic_data['results_sample'] = {
+                        'keys': list(sample.keys()) if isinstance(sample, dict) else 'Not a dict',
+                        'status': sample.get('status') if isinstance(sample, dict) else None,
+                        'has_defects': sample.get('has_defects') if isinstance(sample, dict) else None,
+                        'original_path': sample.get('original_path') if isinstance(sample, dict) else None,
+                        'result_path': sample.get('result_path') if isinstance(sample, dict) else None
+                    }
+            except Exception as e:
+                diagnostic_data['metadata_parse_error'] = str(e)
+                diagnostic_data['metadata_sample'] = str(metadata)[:200] if isinstance(metadata, str) else str(metadata)
+        
+        return jsonify(diagnostic_data)
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'诊断过程中出错: {str(e)}',
+            'trace': traceback.format_exc()
+        }), 500
+

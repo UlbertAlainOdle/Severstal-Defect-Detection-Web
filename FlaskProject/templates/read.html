@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vue 示例</title>
+    <script type="module" src="{{ url_for('static', filename='vue.esm-browser.js') }}"></script>
+</head>
+<body>
+    <div id="app" data-ls='{{ ls | tojson | safe }}'>
+        <h3>{{ number }}</h3>
+        请输入你想要变化的图片<input type="text" v-model.lazy="number"><br>
+        <img :src="'/images/' + ls[number]" style="width: 300px;"><hr>
+        <button @click="next()">下一张</button>
+        <ul>
+            <!-- 使用 v-for 遍历 ls 数组 -->
+            <li v-for="(value, index) in ls" :key="index">
+                <a href="#" @click="jump(index)">{{ value }}</a>
+            </li>
+        </ul>
+    </div>
+
+    <script type="module">
+        import { createApp, ref, watch } from "{{ url_for('static', filename='vue.esm-browser.js') }}"
+    
+        // 让 Flask 服务器传递的 `ls` 变量安全地输出为 JavaScript 变量
+    
+        createApp({
+            setup() {
+                const ls = ref(JSON.parse(document.getElementById("app").dataset.ls));
+                console.log(ls)
+                const number = ref(0);
+    
+                const next = () => {
+                    number.value += 1;
+                };
+    
+                watch(number, (newValue) => {
+                    if (newValue >= ls.length) {
+                        number.value = 0;
+                    }
+                });
+    
+                const jump = (x) => {
+                    number.value = x;
+                };
+    
+                return {
+                    number,
+                    next,
+                    jump,
+                    ls
+                };
+            }
+        }).mount("#app");
+    </script>
+    
+</body>
+</html>
